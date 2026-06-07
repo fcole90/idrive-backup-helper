@@ -8,7 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 from urllib.parse import unquote
 
 
@@ -41,6 +41,7 @@ class FolderEntry:
         if not isinstance(raw_item, dict):
             raise ValueError(f"Directory entry #{index} must be an object.")
 
+        raw_item = cast(dict[str, object], raw_item)
         href = read_string_field(raw_item, "href", index)
         title = read_string_field(raw_item, "title", index)
         absolute_path = read_string_field(raw_item, "absolutePath", index)
@@ -129,10 +130,12 @@ def load_directories(payload_file: Path) -> list[FolderEntry]:
     if not isinstance(payload, dict):
         raise ValueError("Payload must be a JSON object.")
 
+    payload = cast(dict[str, object], payload)
     directories = payload.get("dirs", [])
     if not isinstance(directories, list):
         raise ValueError("Payload field 'dirs' must be a list.")
 
+    directories = cast(list[dict[str, object]], directories)
     return [FolderEntry.from_payload(item, index) for index, item in enumerate(directories, start=1)]
 
 
