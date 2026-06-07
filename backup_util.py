@@ -12,6 +12,7 @@ but for now it focuses solely on the IDrive restoration process.
 """
 
 #!/usr/bin/env python3
+import getpass
 import json
 import subprocess
 import os
@@ -30,7 +31,7 @@ args = parser.parse_args()
 JSON_PAYLOAD_FILE = args.payload
 TARGET_DEPTH = args.depth
 EMAIL = args.email
-CURRENT_USER_NAME = os.getlogin()
+CURRENT_USER_NAME = getpass.getuser()
 
 # --- 2. CONFIGURATION ---
 IDRIVE_BIN_DIR = "/opt/IDriveForLinux/bin"
