@@ -1,161 +1,244 @@
-"""
-Mr. Wolf's IDrive Batch Executor
-
-This script is designed to automate the restoration of folders from IDrive based on a JSON payload extracted from the web interface. 
-It reads the folder structure, filters by specified depth, and triggers the IDrive restore engine for each target folder.
-
-Check the README.md for usage instructions and the deepFolderExtractor.js script for how to generate the required JSON payload from the IDrive web interface.
-
-A following pCloud integration can be added to this script to automatically move the restored folders to a pCloud account, 
-but for now it focuses solely on the IDrive restoration process.
-
-"""
-
 #!/usr/bin/env python3
+"""Batch-restore IDrive folders from an exported JSON payload."""
+
+import argparse
 import getpass
 import json
 import subprocess
-import os
 import sys
-import urllib.parse
-import argparse
-
-# --- 1. ARGUMENT PARSING ---
-parser = argparse.ArgumentParser(description="Wolf IDrive Batch Executor")
-parser.add_argument("payload", help="Path to the downloaded JSON payload file")
-parser.add_argument("--email", "-e", type=str, help="Email address associated with the IDrive account")
-parser.add_argument("-d", "--depth", type=int, default=None, 
-                    help="Target folder depth to process (0 = root, 1 = first-level subfolders, etc.)")
-args = parser.parse_args()
-
-JSON_PAYLOAD_FILE = args.payload
-TARGET_DEPTH = args.depth
-EMAIL = args.email
-CURRENT_USER_NAME = getpass.getuser()
-
-# --- 2. CONFIGURATION ---
-IDRIVE_BIN_DIR = "/opt/IDriveForLinux/bin"
-IDRIVE_BASE_DATA_DIR = "/opt/IDriveForLinux/idriveIt/user_profile"
-IDRIVE_USER_DIR = os.path.join(IDRIVE_BASE_DATA_DIR, CURRENT_USER_NAME, EMAIL)
-ONLINE_RESTORE_DIR = os.path.join(IDRIVE_USER_DIR, "Restore", "DefaultRestoreSet")
-ONLINE_RESTORE__DATA_DIR = os.path.join(ONLINE_RESTORE_DIR, "RestoreData")
-RESTORE_SET_FILE = os.path.join(ONLINE_RESTORE_DIR, "RestoresetFile.txt")
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+from urllib.parse import unquote
 
 
-# --- 3. PATH RESOLUTION ENGINE ---
-def get_folder_path(href):
+IDRIVE_HOME_PREFIX = "https://www.idrive.com/idrive/home/"
+IDRIVE_BIN_DIR = Path("/opt/IDriveForLinux/bin")
+IDRIVE_BASE_DATA_DIR = Path("/opt/IDriveForLinux/idriveIt/user_profile")
+RESTORE_COMMAND = ["./idrive", "--restore"]
+
+
+@dataclass(frozen=True)
+class RestorePaths:
+    payload_file: Path
+    target_depth: Optional[int]
+    idrive_bin_dir: Path
+    user_dir: Path
+    online_restore_dir: Path
+    restore_data_dir: Path
+    restore_set_file: Path
+
+
+@dataclass(frozen=True)
+class FolderEntry:
+    href: str
+    title: str
+    absolute_path: str
+    depth: int
+
+    @classmethod
+    def from_payload(cls, raw_item: object, index: int) -> "FolderEntry":
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"Directory entry #{index} must be an object.")
+
+        href = read_string_field(raw_item, "href", index)
+        title = read_string_field(raw_item, "title", index)
+        absolute_path = read_string_field(raw_item, "absolutePath", index)
+        depth = read_int_field(raw_item, "depth", index)
+
+        return cls(
+            href=href,
+            title=title,
+            absolute_path=absolute_path,
+            depth=depth,
+        )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Wolf IDrive Batch Executor")
+    parser.add_argument("payload", help="Path to the downloaded JSON payload file")
+    parser.add_argument(
+        "--email",
+        "-e",
+        required=True,
+        help="Email address associated with the IDrive account",
+    )
+    parser.add_argument(
+        "--depth",
+        "-d",
+        type=int,
+        default=None,
+        help="Target folder depth to process (0 = root, 1 = first-level subfolders, etc.)",
+    )
+    return parser.parse_args()
+
+
+def build_restore_paths(args: argparse.Namespace) -> RestorePaths:
+    current_user_name = getpass.getuser()
+    user_dir = IDRIVE_BASE_DATA_DIR / current_user_name / args.email
+    online_restore_dir = user_dir / "Restore" / "DefaultRestoreSet"
+
+    return RestorePaths(
+        payload_file=Path(args.payload),
+        target_depth=args.depth,
+        idrive_bin_dir=IDRIVE_BIN_DIR,
+        user_dir=user_dir,
+        online_restore_dir=online_restore_dir,
+        restore_data_dir=online_restore_dir / "RestoreData",
+        restore_set_file=online_restore_dir / "RestoresetFile.txt",
+    )
+
+
+def validate_environment(paths: RestorePaths) -> None:
+    if not paths.idrive_bin_dir.is_dir():
+        raise FileNotFoundError(f"IDrive directory not found at {paths.idrive_bin_dir}")
+
+    if not paths.user_dir.is_dir():
+        raise FileNotFoundError(
+            "User directory not found at "
+            f"{paths.user_dir}. Check the email value and make sure IDrive has run at least once."
+        )
+
+    if not paths.payload_file.is_file():
+        raise FileNotFoundError(f"JSON payload not found at {paths.payload_file}")
+
+
+def read_string_field(raw_item: dict[str, object], key: str, index: int) -> str:
+    value = raw_item.get(key)
+    if not isinstance(value, str):
+        raise ValueError(f"Directory entry #{index} field '{key}' must be a string.")
+    return value
+
+
+def read_int_field(raw_item: dict[str, object], key: str, index: int) -> int:
+    value = raw_item.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"Directory entry #{index} field '{key}' must be an integer.")
+    return value
+
+
+def load_directories(payload_file: Path) -> list[FolderEntry]:
+    try:
+        with payload_file.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Failed to parse JSON file. {error}") from error
+    except OSError as error:
+        raise OSError(f"Failed to read JSON file. {error}") from error
+
+    if not isinstance(payload, dict):
+        raise ValueError("Payload must be a JSON object.")
+
+    directories = payload.get("dirs", [])
+    if not isinstance(directories, list):
+        raise ValueError("Payload field 'dirs' must be a list.")
+
+    return [FolderEntry.from_payload(item, index) for index, item in enumerate(directories, start=1)]
+
+
+def filter_directories(directories: list[FolderEntry], target_depth: Optional[int]) -> list[FolderEntry]:
+    if target_depth is None:
+        return directories
+
+    return [item for item in directories if item.depth == target_depth]
+
+
+def resolve_folder_path(href: Optional[str]) -> str:
     if not href:
         return ""
-    
-    raw_path = href.replace("https://www.idrive.com/idrive/home/", "")
-    split_path = raw_path.split('/')
-    print(f"Raw path: {raw_path}, Split path: {split_path}")
-    if len(split_path) < 2:
-        raise ValueError(f"Unexpected path format: {split_path}. href: {href}")
-    
-    # Remove the device name
-    path = os.path.join(*split_path[1:])
 
-    clean_path = urllib.parse.unquote(path)
-    
-    if not clean_path.startswith('/'):
-        clean_path = '/' + clean_path
-        
-    return clean_path
+    raw_path = href.replace(IDRIVE_HOME_PREFIX, "", 1)
+    parts = [part for part in raw_path.split("/") if part]
+    if len(parts) < 2:
+        raise ValueError(f"Unexpected path format: {href}")
 
-# --- 4. PRE-FLIGHT CHECKS ---
-if not os.path.isdir(IDRIVE_BIN_DIR):
-    print(f"ERROR: IDrive directory not found at {IDRIVE_BIN_DIR}")
-    sys.exit(1)
+    return "/" + unquote("/".join(parts[1:]))
 
-if not os.path.isdir(IDRIVE_USER_DIR):
-    print(f"ERROR: User directory not found at {IDRIVE_USER_DIR}. Check if the email argument is correct and if you have run IDrive at least once.")
-    sys.exit(1)
 
-if not os.path.isfile(JSON_PAYLOAD_FILE):
-    print(f"ERROR: JSON payload not found at {JSON_PAYLOAD_FILE}")
-    sys.exit(1)
+def clear_restore_files(online_restore_dir: Path) -> None:
+    online_restore_dir.mkdir(parents=True, exist_ok=True)
 
-# --- 5. LOAD & FILTER PAYLOAD ---
-try:
-    with open(JSON_PAYLOAD_FILE, 'r') as f:
-        data = json.load(f)
-        raw_directories = data.get("dirs", [])
-except Exception as e:
-    print(f"ERROR: Failed to parse JSON file. {e}")
-    sys.exit(1)
+    for entry in online_restore_dir.iterdir():
+        if not entry.is_file():
+            continue
 
-# Filter the execution queue based on the requested depth
-directories = []
-for item in raw_directories:
-    item_depth = item.get("depth")
-    
-    # If a specific depth was requested, enforce the filter
-    if TARGET_DEPTH is not None:
-        if item_depth == TARGET_DEPTH:
-            directories.append(item)
-    else:
-        # If no depth specified, add everything (Warning: Potential overlaps)
-        directories.append(item)
+        try:
+            entry.unlink()
+            print(f"Removed file: {entry}")
+        except OSError as error:
+            print(f"WARNING: Could not remove file {entry}. {error}")
 
-if not directories:
-    depth_msg = TARGET_DEPTH if TARGET_DEPTH is not None else "All"
-    print(f"WARNING: No directories found matching the requested criteria (Depth: {depth_msg}).")
-    sys.exit(0)
 
-print(f"Queue verified. Found {len(directories)} directories at depth {TARGET_DEPTH if TARGET_DEPTH is not None else 'ALL'}.")
-
-# --- 6. EXECUTION LOOP ---
-for index, item in enumerate(directories, start=1):
-    folder_href = item.get("href")
-    
-    absolute_target_path = get_folder_path(folder_href)
-    
-    if not absolute_target_path or absolute_target_path == '/':
-        continue
-
-    print("=" * 50)
-    print(f"TARGET ACQUIRED [{index}/{len(directories)}]: {absolute_target_path}")
-    print("=" * 50)
-
-    # Overwrite the RestoreList.txt file with the absolute target
-    os.makedirs(os.path.dirname(RESTORE_SET_FILE), exist_ok=True)
-
-    # Remove all files in the dir that are not dirs themselves to prevent conflicts with the IDrive engine
-    for filename in os.listdir(ONLINE_RESTORE_DIR):
-        file_path = os.path.join(ONLINE_RESTORE_DIR, filename)
-        if os.path.isfile(file_path):
-            try:
-                os.remove(file_path)
-                print(f"Removed file: {file_path}")
-            except Exception as e:
-                print(f"WARNING: Could not remove file {file_path}. {e}")
-
+def write_restore_set(restore_set_file: Path, target_path: str) -> None:
     try:
-        with open(RESTORE_SET_FILE, 'w') as f:
-            f.write(absolute_target_path + '\n')
-    except IOError as e:
-        print(f"ERROR: Could not write to {RESTORE_SET_FILE}. {e}")
-        sys.exit(1)
+        restore_set_file.write_text(f"{target_path}\n", encoding="utf-8")
+    except OSError as error:
+        raise OSError(f"Could not write to {restore_set_file}. {error}") from error
 
 
-    # Trigger the IDrive engine non-interactively
+def run_restore(idrive_bin_dir: Path) -> int:
+    result = subprocess.run(RESTORE_COMMAND, cwd=idrive_bin_dir, check=False)
+    return result.returncode
+
+
+def process_directory(index: int, total: int, item: FolderEntry, paths: RestorePaths) -> bool:
+    try:
+        absolute_target_path = resolve_folder_path(item.href)
+    except ValueError as error:
+        print(f"WARNING: Skipping malformed entry [{index}/{total}]. {error}")
+        return False
+
+    if absolute_target_path in {"", "/"}:
+        return False
+
+    print("=" * 50)
+    print(f"TARGET ACQUIRED [{index}/{total}]: {absolute_target_path}")
+    print("=" * 50)
+
+    clear_restore_files(paths.online_restore_dir)
+    write_restore_set(paths.restore_set_file, absolute_target_path)
+
     print("Initiating IDrive restore engine...")
-    try:
-        result = subprocess.run(
-            ['./idrive', '--restore'], 
-            cwd=IDRIVE_BIN_DIR,
-            check=False
-        )
-        
-        if result.returncode == 0:
-            print(f"COMPLETED: {absolute_target_path}\n")
-        else:
-            print(f"WARNING: IDrive exited with code {result.returncode} for {absolute_target_path}\n")
-            
-    except Exception as e:
-        print(f"FATAL ERROR executing IDrive: {e}")
-        sys.exit(1)
+    return_code = run_restore(paths.idrive_bin_dir)
 
-print("All specified folders for the selected depth have been processed.")
-print(f"You can find them at {ONLINE_RESTORE__DATA_DIR}.")
+    if return_code == 0:
+        print(f"COMPLETED: {absolute_target_path}\n")
+        return True
+
+    print(f"WARNING: IDrive exited with code {return_code} for {absolute_target_path}\n")
+    return False
+
+
+def main() -> int:
+    args = parse_args()
+    paths = build_restore_paths(args)
+
+    try:
+        validate_environment(paths)
+        directories = filter_directories(load_directories(paths.payload_file), paths.target_depth)
+    except (FileNotFoundError, OSError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    if not directories:
+        depth_label = paths.target_depth if paths.target_depth is not None else "ALL"
+        print(f"WARNING: No directories found matching the requested criteria (Depth: {depth_label}).")
+        return 0
+
+    depth_label = paths.target_depth if paths.target_depth is not None else "ALL"
+    print(f"Queue verified. Found {len(directories)} directories at depth {depth_label}.")
+
+    try:
+        for index, item in enumerate(directories, start=1):
+            process_directory(index, len(directories), item, paths)
+    except OSError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    print("All specified folders for the selected depth have been processed.")
+    print(f"You can find them at {paths.restore_data_dir}.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
