@@ -1,0 +1,47 @@
+[project]
+name = "my-project"
+version = "0.1.0"
+description = ""
+authors = [{ name = "Name Surname", email = "email@example.com" }]
+readme = "README.md"
+dependencies = ["rich==13.7.1"]
+
+[dependency-groups]
+dev = ["black>=25.1.0", "pyright>=1.1.400"]
+docs = ["mkdocs>=1.6.0"]
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+packages = [{ include = "my_project", from = "src" }]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+requests = "^2.32.3"
+httpx = { version = "~0.28.1", extras = ["http2"] }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0"
+mypy = "^1.15.0"
+
+[tool.poetry.group.docs.dependencies]
+mkdocstrings = "^0.28.0"
+
+[tool.poetry.requires-plugins]
+someplugin = "value"
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "--import-mode=importlib"
+testpaths = ["src", "scripts"]
+python_files = ["*_test.py"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[project.scripts]
+transition-to-uv = "scripts.transition_to_uv:main"
+other-script = "my_project.main:main"

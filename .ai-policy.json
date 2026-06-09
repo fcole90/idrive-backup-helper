@@ -1,0 +1,45 @@
+{
+  "protectedFiles": [
+    "*.env",
+    "*.env.*",
+    "*.pem",
+    "*.key",
+    "*.pub",
+    "credentials.json",
+    "secrets/",
+    "internal-config.yml"
+  ],
+  "excludedFiles": [
+    "**/node_modules/",
+    "**/.next/",
+    "dist/",
+    "build/",
+    "out/",
+    "*.log",
+    "*.tmp",
+    "*.bak",
+    "tmp/",
+    "temp/",
+    "logs/",
+    ".turbo/"
+  ],
+  "terminalAutoApprove": {
+    "/^git (log|status).*$/": true,
+    "/^uv run poe (lint|lint-fix|typecheck|test)$/": true,
+    "/^uv run (poe (sync-ai-policy|sync-ai-policy-import-vscode|policy-check)|agentic-tools policy (sync|import-vscode|check))$/": true,
+    "rm": false,
+    "rmdir": false,
+    "del": false,
+    "curl": false,
+    "wget": false
+  },
+  "editAutoApprove": {
+    "**/*.{py,json,yml,yaml,css,md}": true,
+    "**/.env*": false,
+    "**/secrets/**": false,
+    "**/.aiexclude": false,
+    "**/.ai-policy.json": false,
+    "**/*.{pem,key,pub}": false,
+    "**/internal-config.yml": false
+  }
+}

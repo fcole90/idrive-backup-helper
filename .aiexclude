@@ -1,0 +1,29 @@
+# ==============================================================================
+# AI EXCLUSION FILE
+# Generated from .ai-policy.json
+# Protected files are sensitive; excluded files are mostly noise or generated output.
+# ==============================================================================
+
+# --- 1. Protected files ---
+*.env
+*.env.*
+*.pem
+*.key
+*.pub
+credentials.json
+secrets/
+internal-config.yml
+
+# --- 2. Excluded noise / generated output ---
+**/node_modules/
+**/.next/
+dist/
+build/
+out/
+*.log
+*.tmp
+*.bak
+tmp/
+temp/
+logs/
+.turbo/

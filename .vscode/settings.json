@@ -1,14 +1,65 @@
 {
-  "github.copilot.enable": {
-    "*": true,
-    "plaintext": false,
-    "markdown": true,
-    "scminput": false,
-    "json": false,
-    "jsonc": false
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit",
+    "source.fixAll": "explicit"
+  },
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "editor.formatOnSave": true,
+  "editor.autoIndent": "advanced",
+  "editor.guides.indentation": true,
+  "editor.tabSize": 2,
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.tabSize": 4
+  },
+  "python.analysis.autoFormatStrings": true,
+  "python.analysis.completeFunctionParens": true,
+  "python.analysis.autoImportCompletions": true,
+  "python.languageServer": "Pylance",
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true,
+  "chat.tools.terminal.autoApprove": {
+    "/^git (log|status).*$/": true,
+    "/^uv run poe (lint|lint-fix|typecheck|test)$/": true,
+    "/^uv run (poe (sync-ai-policy|sync-ai-policy-import-vscode|policy-check)|agentic-tools policy (sync|import-vscode|check))$/": true,
+    "rm": false,
+    "rmdir": false,
+    "del": false,
+    "curl": false,
+    "wget": false
   },
   "chat.tools.edits.autoApprove": {
-    "**/*.json": false,
-    "**/*.jsonc": false
+    "**/*.{py,json,yml,yaml,css,md}": true,
+    "**/.env*": false,
+    "**/secrets/**": false,
+    "**/.aiexclude": false,
+    "**/.ai-policy.json": false,
+    "**/*.{pem,key,pub}": false,
+    "**/internal-config.yml": false
+  },
+  "files.exclude": {
+    "**/node_modules": true,
+    ".venv": true,
+    "venv": true,
+    "__pycache__": true,
+    ".env": true,
+    ".env.*": true,
+    "dist": true,
+    "build": true,
+    "**/.agent": false
+  },
+  "files.associations": {
+    "*.env": "copilot-restricted-file",
+    "*.env.*": "copilot-restricted-file",
+    "*.pem": "copilot-restricted-file",
+    "*.key": "copilot-restricted-file",
+    "*.pub": "copilot-restricted-file",
+    "credentials.json": "copilot-restricted-file",
+    "secrets/": "copilot-restricted-file",
+    "internal-config.yml": "copilot-restricted-file"
+  },
+  "github.copilot.enable": {
+    "copilot-restricted-file": false
   }
 }
