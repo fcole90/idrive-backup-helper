@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from typing import cast
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_PACKAGE_NAME = "my_project"
@@ -261,16 +262,31 @@ def get_project_scripts(content: str) -> dict[str, str]:
     project_config = parse_toml(content).get("project")
     if not isinstance(project_config, dict):
         return {}
+    project_config = cast(dict[str, object], project_config)
 
     scripts = project_config.get("scripts")
     if not isinstance(scripts, dict):
         return {}
+    scripts = cast(dict[str, object], scripts)
 
     result: dict[str, str] = {}
     for key, value in scripts.items():
-        if isinstance(key, str) and isinstance(value, str):
+        if isinstance(value, str):
             result[key] = value
     return result
+
+
+def get_script_root_modules(content: str) -> list[str]:
+    """Read top-level module names referenced by project scripts."""
+    root_modules: list[str] = []
+    for script_target in get_project_scripts(content).values():
+        root_module = re.split(r"[.:]", script_target, maxsplit=1)[0]
+        if not root_module or root_module == "scripts":
+            continue
+        if root_module not in root_modules:
+            root_modules.append(root_module)
+
+    return root_modules
 
 
 def get_wheel_packages(content: str) -> list[str]:
@@ -278,26 +294,32 @@ def get_wheel_packages(content: str) -> list[str]:
     tool_config = parse_toml(content).get("tool")
     if not isinstance(tool_config, dict):
         return []
+    tool_config = cast(dict[str, object], tool_config)
 
     hatch_config = tool_config.get("hatch")
     if not isinstance(hatch_config, dict):
         return []
+    hatch_config = cast(dict[str, object], hatch_config)
 
     build_config = hatch_config.get("build")
     if not isinstance(build_config, dict):
         return []
+    build_config = cast(dict[str, object], build_config)
 
     targets_config = build_config.get("targets")
     if not isinstance(targets_config, dict):
         return []
+    targets_config = cast(dict[str, object], targets_config)
 
     wheel_config = targets_config.get("wheel")
     if not isinstance(wheel_config, dict):
         return []
+    wheel_config = cast(dict[str, object], wheel_config)
 
     packages = wheel_config.get("packages")
     if not isinstance(packages, list):
         return []
+    packages = cast(list[object], packages)
 
     return [package for package in packages if isinstance(package, str)]
 
@@ -307,17 +329,19 @@ def update_project_scripts(
 ) -> str:
     """Rewrite project script import targets that point at the package."""
     updated_content = content
+    package_roots_to_replace = {old_package_name, *get_script_root_modules(content)}
     for script_name, script_target in get_project_scripts(content).items():
-        if script_target == old_package_name or script_target.startswith(
-            (f"{old_package_name}.", f"{old_package_name}:")
-        ):
-            new_target = f"{new_package_name}{script_target[len(old_package_name):]}"
-            updated_content = set_key_in_section(
-                updated_content,
-                "project.scripts",
-                script_name,
-                f'"{new_target}"',
-            )
+        target_root = re.split(r"[.:]", script_target, maxsplit=1)[0]
+        if target_root not in package_roots_to_replace or target_root == "scripts":
+            continue
+
+        new_target = f"{new_package_name}{script_target[len(target_root):]}"
+        updated_content = set_key_in_section(
+            updated_content,
+            "project.scripts",
+            script_name,
+            f'"{new_target}"',
+        )
 
     return updated_content
 
@@ -348,19 +372,33 @@ def update_pyproject_content(
         )
 
     existing_packages = get_wheel_packages(updated_content)
+    source_package = f"src/{new_package_name}"
+    source_packages_to_replace = {
+        f"src/{package_name}"
+        for package_name in [
+            old_package_name,
+            *get_script_root_modules(updated_content),
+        ]
+    }
+
     updated_packages = [
-        package.replace(old_package_name, new_package_name)
+        source_package if package in source_packages_to_replace else package
         for package in existing_packages
     ]
-    source_package = f"src/{new_package_name}"
+
+    deduplicated_packages: list[str] = []
+    for package in updated_packages:
+        if package not in deduplicated_packages:
+            deduplicated_packages.append(package)
+
     if source_package not in updated_packages:
-        updated_packages.append(source_package)
+        deduplicated_packages.append(source_package)
 
     updated_content = set_key_in_section(
         updated_content,
         "tool.hatch.build.targets.wheel",
         "packages",
-        format_array(updated_packages),
+        format_array(deduplicated_packages),
     )
     return update_project_scripts(
         updated_content,
