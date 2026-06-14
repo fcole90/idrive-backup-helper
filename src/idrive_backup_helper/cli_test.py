@@ -15,3 +15,22 @@ def test_build_parser_accepts_auth_url_override() -> None:
 
     assert args.command == "auth"
     assert args.url == "https://example.com"
+
+
+def test_build_parser_accepts_download_folder_command() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "download-folder",
+            "--url",
+            "https://example.com/folder",
+            "--to",
+            "/tmp/output",
+        ]
+    )
+
+    assert args.command == "download-folder"
+    assert args.url == "https://example.com/folder"
+    assert str(args.to) == "/tmp/output"
+    assert args.headed is False
+    assert args.timeout_ms == 120_000

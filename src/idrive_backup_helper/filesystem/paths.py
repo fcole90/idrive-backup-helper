@@ -17,3 +17,7 @@ def playground_dir(repo_root: Path) -> Path:
 
 def browser_profile_dir(repo_root: Path) -> Path:
     return playground_dir(repo_root) / "browser-state" / "idrive-chromium"
+
+
+def downloads_dir(repo_root: Path) -> Path:
+    return playground_dir(repo_root) / "downloads"
