@@ -47,7 +47,6 @@ reportUnknownModuleType = "warning"
 reportUnnecessaryTypeIgnoreComment = "warning"
 
 [project.scripts]
-init-project = "scripts.init_project:main"
 main = "idrive_backup_helper.main:main"
 
 [tool.poe.tasks]
