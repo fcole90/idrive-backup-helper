@@ -1,3 +1,6 @@
+# Workspace directory to try 
+.workspace
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
