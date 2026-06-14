@@ -3,7 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from idrive_backup_helper.browser.downloads import list_current_folder_files
+from idrive_backup_helper.browser.downloads import download_current_folder
 from idrive_backup_helper.browser.session import login_and_save_state
 from idrive_backup_helper.filesystem.paths import (
     browser_profile_dir,
@@ -47,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=120_000,
         help="Playwright timeout for page operations",
     )
+    download_parser.add_argument(
+        "--cooldown-ms",
+        type=int,
+        default=1_500,
+        help="Pause between file download interactions",
+    )
+    download_parser.add_argument(
+        "--overwrite",
+        choices=["skip", "replace", "fail"],
+        default="skip",
+        help="How to handle already-existing destination files",
+    )
 
     return parser
 
@@ -66,7 +78,9 @@ def _run_download_folder(
     destination: Path,
     headed: bool,
     timeout_ms: int,
-) -> None:
+    cooldown_ms: int,
+    overwrite: str,
+) -> int:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
 
@@ -74,18 +88,23 @@ def _run_download_folder(
         raise RuntimeError("Missing browser auth state. Run: uv run main auth")
 
     staged_downloads_dir = downloads_dir(repo_root)
-    files = list_current_folder_files(
+    report = download_current_folder(
         profile_dir=profile_dir,
         downloads_dir=staged_downloads_dir,
         url=url,
+        destination=destination,
         headless=not headed,
         timeout_ms=timeout_ms,
+        cooldown_ms=cooldown_ms,
+        overwrite=overwrite,
     )
 
     print(f"Destination: {destination}")
-    print(f"Found {len(files)} visible file(s) in current IDrive folder:")
-    for remote_file in files:
-        print(f"- {remote_file.file_name}")
+    print(f"Downloaded: {len(report.downloaded)}")
+    print(f"Skipped: {len(report.skipped)}")
+    print(f"Failed: {len(report.failed)}")
+    print(f"Manifest: {report.manifest_path}")
+    return report.exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -97,13 +116,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _run_auth(args.url)
             return 0
         if args.command == "download-folder":
-            _run_download_folder(
+            return _run_download_folder(
                 url=args.url,
                 destination=args.to,
                 headed=args.headed,
                 timeout_ms=args.timeout_ms,
+                cooldown_ms=args.cooldown_ms,
+                overwrite=args.overwrite,
             )
-            return 0
     except RuntimeError as error:
         print(str(error), file=sys.stderr)
         return 2

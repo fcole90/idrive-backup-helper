@@ -34,3 +34,5 @@ def test_build_parser_accepts_download_folder_command() -> None:
     assert str(args.to) == "/tmp/output"
     assert args.headed is False
     assert args.timeout_ms == 120_000
+    assert args.cooldown_ms == 1_500
+    assert args.overwrite == "skip"

@@ -1,9 +1,14 @@
 import pytest
 
 from idrive_backup_helper.browser.downloads import (
+    DownloadFolderReport,
+    FailedFile,
     ensure_raw_file_list,
+    build_manifest_path,
     parse_remote_files,
 )
+from datetime import datetime
+from pathlib import Path
 
 
 def test_parse_remote_files_accepts_valid_payload() -> None:
@@ -33,3 +38,38 @@ def test_parse_remote_files_rejects_missing_file_name() -> None:
 def test_parse_remote_files_rejects_non_list_payload() -> None:
     with pytest.raises(ValueError, match="JSON array"):
         ensure_raw_file_list({"fileName": "bad"})
+
+
+def test_build_manifest_path_uses_expected_file_name() -> None:
+    manifest_path = build_manifest_path(
+        Path("/tmp/downloads"),
+        datetime(2026, 6, 14, 14, 30, 0),
+    )
+
+    assert manifest_path.name == "download-folder-run-2026-06-14T14-30-00.json"
+
+
+def test_download_folder_report_exit_code_tracks_failures() -> None:
+    clean_report = DownloadFolderReport(
+        url="https://example.com",
+        destination=Path("/tmp/out"),
+        started_at=datetime(2026, 6, 14, 14, 30, 0),
+        finished_at=datetime(2026, 6, 14, 14, 31, 0),
+        downloaded=[],
+        skipped=[],
+        failed=[],
+        manifest_path=Path("/tmp/downloads/report.json"),
+    )
+    failed_report = DownloadFolderReport(
+        url="https://example.com",
+        destination=Path("/tmp/out"),
+        started_at=datetime(2026, 6, 14, 14, 30, 0),
+        finished_at=datetime(2026, 6, 14, 14, 31, 0),
+        downloaded=[],
+        skipped=[],
+        failed=[FailedFile(file_name="bad.zip", reason="Download timed out")],
+        manifest_path=Path("/tmp/downloads/report.json"),
+    )
+
+    assert clean_report.exit_code == 0
+    assert failed_report.exit_code == 1
