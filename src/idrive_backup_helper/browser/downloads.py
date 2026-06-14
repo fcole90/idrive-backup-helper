@@ -71,6 +71,8 @@ type OverwriteMode = Literal["skip", "replace", "fail"]
 
 FOLDER_SETTLE_POLL_MS = 1_000
 FOLDER_SETTLE_STABLE_TICKS = 10
+FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
+FOLDER_LOAD_RETRY_TIMEOUT_MS = 120_000
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,42 @@ def _ensure_expected_folder_loaded(
     )
 
 
+def _load_folder_with_retry(
+    page: Page,
+    *,
+    target_url: str,
+    timeout_ms: int,
+    allow_interactive_login: bool,
+    expected_folder_name: str | None,
+) -> None:
+    deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
+    last_error = RuntimeError("Folder load retry exhausted")
+
+    while True:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded")
+            ensure_authenticated_page(
+                page,
+                target_url=target_url,
+                allow_interactive_login=allow_interactive_login,
+            )
+            _wait_for_folder_view_settle(page, timeout_ms)
+            _ensure_expected_folder_loaded(page, expected_folder_name)
+            return
+        except RuntimeError as error:
+            last_error = error
+
+        if time.monotonic() >= deadline:
+            break
+
+        page.wait_for_timeout(FOLDER_LOAD_RETRY_INTERVAL_MS)
+
+    raise RuntimeError(
+        "Failed to load folder after retries "
+        f"({FOLDER_LOAD_RETRY_TIMEOUT_MS // 1000}s limit): {last_error}"
+    )
+
+
 def _download_one_file(
     page: Page,
     remote_file: RemoteFile,
@@ -369,13 +407,13 @@ def list_current_folder_files(
 
     with BrowserEngine(config) as engine:
         page = engine.new_page()
-        page.goto(url, wait_until="domcontentloaded")
-        ensure_authenticated_page(
+        _load_folder_with_retry(
             page,
             target_url=url,
+            timeout_ms=timeout_ms,
             allow_interactive_login=not headless,
+            expected_folder_name=None,
         )
-        _wait_for_folder_view_settle(page, timeout_ms)
         return _evaluate_current_folder_files(page)
 
 
@@ -417,14 +455,13 @@ def download_current_folder(
             visited_destinations.add(folder_task.destination)
             ensure_destination_dir(folder_task.destination)
 
-            page.goto(folder_task.url, wait_until="domcontentloaded")
-            ensure_authenticated_page(
+            _load_folder_with_retry(
                 page,
                 target_url=folder_task.url,
+                timeout_ms=timeout_ms,
                 allow_interactive_login=not headless,
+                expected_folder_name=folder_task.expected_folder_name,
             )
-            _wait_for_folder_view_settle(page, timeout_ms)
-            _ensure_expected_folder_loaded(page, folder_task.expected_folder_name)
             remote_entries = _evaluate_current_folder_entries(page)
             _precheck_overwrite_conflicts(
                 remote_entries.files,
