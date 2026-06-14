@@ -82,6 +82,10 @@ class FolderTask:
     expected_folder_name: str | None
 
 
+def _log(message: str) -> None:
+    print(f"[download-folder] {message}", flush=True)
+
+
 def _js_asset_path(name: str) -> Path:
     return Path(__file__).resolve().parent / "js" / name
 
@@ -265,9 +269,18 @@ def _load_folder_with_retry(
 ) -> None:
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder load retry exhausted")
+    attempt = 1
 
     while True:
         try:
+            _log(
+                f"Loading folder attempt {attempt}: {target_url}"
+                + (
+                    f" (expecting '{expected_folder_name}')"
+                    if expected_folder_name is not None
+                    else ""
+                )
+            )
             page.goto(target_url, wait_until="domcontentloaded")
             ensure_authenticated_page(
                 page,
@@ -276,13 +289,19 @@ def _load_folder_with_retry(
             )
             _wait_for_folder_view_settle(page, timeout_ms)
             _ensure_expected_folder_loaded(page, expected_folder_name)
+            _log(f"Folder load succeeded on attempt {attempt}: {target_url}")
             return
         except Exception as error:
             last_error = error
+            _log(f"Folder load attempt {attempt} failed: {error}")
 
         if time.monotonic() >= deadline:
             break
 
+        attempt += 1
+        _log(
+            f"Retrying folder load in {FOLDER_LOAD_RETRY_INTERVAL_MS // 1000}s: {target_url}"
+        )
         page.wait_for_timeout(FOLDER_LOAD_RETRY_INTERVAL_MS)
 
     raise RuntimeError(
@@ -301,6 +320,7 @@ def _load_folder_entries_with_retry(
 ) -> RemoteEntries:
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder entries retry exhausted")
+    attempt = 1
 
     while True:
         try:
@@ -312,6 +332,10 @@ def _load_folder_entries_with_retry(
                 expected_folder_name=expected_folder_name,
             )
             entries = _evaluate_current_folder_entries(page)
+            _log(
+                f"Folder entries attempt {attempt}: found {len(entries.files)} file(s), "
+                f"{len(entries.folders)} folder(s)"
+            )
 
             # Child folders that parse as empty right after navigation are
             # usually not fully rendered yet in IDrive's SPA flow.
@@ -327,10 +351,15 @@ def _load_folder_entries_with_retry(
             return entries
         except Exception as error:
             last_error = error
+            _log(f"Folder entries attempt {attempt} failed: {error}")
 
         if time.monotonic() >= deadline:
             break
 
+        attempt += 1
+        _log(
+            f"Retrying folder entries in {FOLDER_LOAD_RETRY_INTERVAL_MS // 1000}s: {target_url}"
+        )
         page.wait_for_timeout(FOLDER_LOAD_RETRY_INTERVAL_MS)
 
     raise RuntimeError(
@@ -346,6 +375,7 @@ def _download_one_file(
     cooldown_ms: int,
 ) -> Path:
     script = _load_js_asset("trigger_file_download.js")
+    _log(f"Starting download: {remote_file.file_name}")
 
     try:
         with page.expect_download() as download_info:
@@ -366,6 +396,7 @@ def _download_one_file(
 
     staged_path = staging_dir / download.suggested_filename
     download.save_as(str(staged_path))
+    _log(f"Staged download complete: {remote_file.file_name} -> {staged_path}")
     return staged_path
 
 
@@ -494,10 +525,15 @@ def download_current_folder(
         while folder_queue:
             folder_task = folder_queue.pop(0)
             if folder_task.destination in visited_destinations:
+                _log(f"Skipping already visited destination: {folder_task.destination}")
                 continue
 
             visited_destinations.add(folder_task.destination)
             ensure_destination_dir(folder_task.destination)
+            _log(
+                f"Processing folder: {folder_task.url} -> {folder_task.destination} "
+                f"(queue remaining: {len(folder_queue)})"
+            )
 
             remote_entries = _load_folder_entries_with_retry(
                 page,
@@ -514,6 +550,9 @@ def download_current_folder(
 
             for remote_folder in remote_entries.folders:
                 child_destination = folder_task.destination / remote_folder.folder_name
+                _log(
+                    f"Queueing child folder: {remote_folder.folder_name} -> {child_destination}"
+                )
                 folder_queue.append(
                     FolderTask(
                         url=remote_folder.href,
@@ -525,6 +564,7 @@ def download_current_folder(
             for remote_file in remote_entries.files:
                 final_path = folder_task.destination / remote_file.file_name
                 if final_path.exists() and overwrite_mode == "skip":
+                    _log(f"Skipping existing file: {final_path}")
                     skipped.append(
                         SkippedFile(
                             file_name=remote_file.file_name,
@@ -546,7 +586,9 @@ def download_current_folder(
                         remote_file.file_name,
                         replace_existing=overwrite_mode == "replace",
                     )
+                    _log(f"Moved download to destination: {moved_path}")
                 except (OSError, RuntimeError) as error:
+                    _log(f"Failed file download: {remote_file.file_name} ({error})")
                     failed.append(
                         FailedFile(
                             file_name=remote_file.file_name,
