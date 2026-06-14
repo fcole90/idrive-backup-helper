@@ -7,6 +7,7 @@ from typing import Literal, cast
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
+from idrive_backup_helper.browser.session import ensure_authenticated_page
 from idrive_backup_helper.filesystem.moves import move_download_to_destination
 
 
@@ -179,6 +180,11 @@ def build_manifest_path(downloads_dir: Path, started_at: datetime) -> Path:
     return downloads_dir / f"download-folder-run-{timestamp}.json"
 
 
+def ensure_destination_dir(destination: Path) -> Path:
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination
+
+
 def _serialize_path(path: Path, repo_root: Path) -> str:
     try:
         return str(path.relative_to(repo_root))
@@ -214,12 +220,6 @@ def _write_manifest(report: DownloadFolderReport, repo_root: Path) -> None:
         json.dumps(manifest, indent=2) + "\n",
         encoding="utf-8",
     )
-
-
-def _check_auth_state(page: Page) -> None:
-    current_url = page.url.lower()
-    if "/login/" in current_url or "loginform" in current_url:
-        raise RuntimeError("IDrive session is not authenticated. Run: uv run main auth")
 
 
 def _precheck_overwrite_conflicts(
@@ -258,7 +258,11 @@ def list_current_folder_files(
     with BrowserEngine(config) as engine:
         page = engine.new_page()
         page.goto(url, wait_until="domcontentloaded")
-        _check_auth_state(page)
+        ensure_authenticated_page(
+            page,
+            target_url=url,
+            allow_interactive_login=not headless,
+        )
         return _evaluate_current_folder_files(page)
 
 
@@ -274,6 +278,7 @@ def download_current_folder(
     overwrite: str,
 ) -> DownloadFolderReport:
     overwrite_mode = cast(OverwriteMode, overwrite)
+    destination = ensure_destination_dir(destination)
     config = BrowserConfig(
         profile_dir=profile_dir,
         downloads_dir=downloads_dir,
@@ -288,7 +293,11 @@ def download_current_folder(
     with BrowserEngine(config) as engine:
         page = engine.new_page()
         page.goto(url, wait_until="domcontentloaded")
-        _check_auth_state(page)
+        ensure_authenticated_page(
+            page,
+            target_url=url,
+            allow_interactive_login=not headless,
+        )
         remote_files = _evaluate_current_folder_files(page)
         _precheck_overwrite_conflicts(remote_files, destination, overwrite_mode)
 

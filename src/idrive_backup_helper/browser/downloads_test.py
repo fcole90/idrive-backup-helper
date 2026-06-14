@@ -3,8 +3,9 @@ import pytest
 from idrive_backup_helper.browser.downloads import (
     DownloadFolderReport,
     FailedFile,
-    ensure_raw_file_list,
     build_manifest_path,
+    ensure_destination_dir,
+    ensure_raw_file_list,
     parse_remote_files,
 )
 from datetime import datetime
@@ -47,6 +48,16 @@ def test_build_manifest_path_uses_expected_file_name() -> None:
     )
 
     assert manifest_path.name == "download-folder-run-2026-06-14T14-30-00.json"
+
+
+def test_ensure_destination_dir_creates_missing_directory(tmp_path: Path) -> None:
+    destination = tmp_path / "nested" / "output"
+
+    result = ensure_destination_dir(destination)
+
+    assert result == destination
+    assert destination.exists()
+    assert destination.is_dir()
 
 
 def test_download_folder_report_exit_code_tracks_failures() -> None:
