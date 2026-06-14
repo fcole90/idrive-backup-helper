@@ -10,7 +10,7 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-  "agentic-tools @ git+https://github.com/swiftpostlab/agentic-tools.git@09bef3589526112c3c861847e72a7cfc839c8415",
+  "agentic-tools @ git+https://github.com/swiftpostlab/agentic-tools.git",
   "poethepoet>=0.46.0",
   "pytest>=9.1.0",
   "black>=26.5.1",

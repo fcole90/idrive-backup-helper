@@ -5,7 +5,7 @@ requires-python = ">=3.14, <4.0"
 [[package]]
 name = "agentic-tools"
 version = "0.1.0"
-source = { git = "https://github.com/swiftpostlab/agentic-tools.git?rev=09bef3589526112c3c861847e72a7cfc839c8415#09bef3589526112c3c861847e72a7cfc839c8415" }
+source = { git = "https://github.com/swiftpostlab/agentic-tools.git#8fbc8dd1631496bf30388a7a044a5b88f4ff7b05" }
 dependencies = [
     { name = "json5" },
     { name = "pydantic" },
@@ -92,7 +92,7 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "agentic-tools", git = "https://github.com/swiftpostlab/agentic-tools.git?rev=09bef3589526112c3c861847e72a7cfc839c8415" },
+    { name = "agentic-tools", git = "https://github.com/swiftpostlab/agentic-tools.git" },
     { name = "black", specifier = ">=26.5.1" },
     { name = "json5", specifier = ">=0.9" },
     { name = "poethepoet", specifier = ">=0.46.0" },
