@@ -1,6 +1,10 @@
 # Workspace directory to try 
 .workspace
 
+# Local agent workspaces (task notes and scratch artifacts)
+.agents/tasks/
+.agents/playground/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
