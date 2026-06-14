@@ -93,7 +93,7 @@ def run_verify(
     print(f"\n>>> EXECUTING VERIFICATION AUDIT")
     cmd = [
         sys.executable,
-        "verify_backup.py",
+        "verify-backup.py",
         str(master_payload),
         "-l",
         str(local_root),
@@ -136,7 +136,7 @@ def run_verify(
 
     except FileNotFoundError as e:
         raise FileNotFoundError(
-            "verify_backup.py not found in the current directory."
+            "verify-backup.py not found in the current directory."
         ) from e
 
 
