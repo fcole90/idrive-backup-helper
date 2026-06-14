@@ -61,5 +61,8 @@
     "dist": true,
     "build": true,
     "**/.agent": false
-  }
+  },
+  "cSpell.words": [
+    "idrive"
+  ]
 }
