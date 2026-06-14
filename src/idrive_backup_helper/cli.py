@@ -4,7 +4,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from idrive_backup_helper.browser.downloads import download_current_folder
-from idrive_backup_helper.browser.session import login_and_save_state
+from idrive_backup_helper.browser.session import (
+    DEFAULT_BROWSE_URL,
+    login_and_save_state,
+    open_authenticated_browser,
+)
 from idrive_backup_helper.filesystem.paths import (
     browser_profile_dir,
     downloads_dir,
@@ -23,6 +27,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--url",
         default="https://www.idrive.com/idrive/login/loginForm",
         help="IDrive URL to open for login",
+    )
+
+    browse_parser = subparsers.add_parser(
+        "browse",
+        help="Open an authenticated IDrive browser for manual folder inspection",
+    )
+    browse_parser.add_argument(
+        "--url",
+        default=DEFAULT_BROWSE_URL,
+        help="IDrive URL to open in the authenticated browser",
     )
 
     download_parser = subparsers.add_parser(
@@ -69,7 +83,15 @@ def _run_auth(url: str) -> None:
     login_and_save_state(profile_dir=profile_dir, start_url=url)
 
     print(f"Saved browser state under: {profile_dir}")
-    print("Next step: uv run main download-folder --url <FOLDER_URL> --to <DEST_PATH>")
+    print(
+        "Next step: uv run main browse or uv run main download-folder --url <FOLDER_URL> --to <DEST_PATH>"
+    )
+
+
+def _run_browse(url: str) -> None:
+    repo_root = find_repo_root()
+    profile_dir = browser_profile_dir(repo_root)
+    open_authenticated_browser(profile_dir=profile_dir, start_url=url)
 
 
 def _run_download_folder(
@@ -114,6 +136,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "auth":
             _run_auth(args.url)
+            return 0
+        if args.command == "browse":
+            _run_browse(args.url)
             return 0
         if args.command == "download-folder":
             return _run_download_folder(

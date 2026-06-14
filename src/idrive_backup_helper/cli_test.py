@@ -17,6 +17,22 @@ def test_build_parser_accepts_auth_url_override() -> None:
     assert args.url == "https://example.com"
 
 
+def test_build_parser_accepts_browse_command() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["browse"])
+
+    assert args.command == "browse"
+    assert args.url == "https://www.idrive.com/idrive/home"
+
+
+def test_build_parser_accepts_browse_url_override() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["browse", "--url", "https://example.com/home"])
+
+    assert args.command == "browse"
+    assert args.url == "https://example.com/home"
+
+
 def test_build_parser_accepts_download_folder_command() -> None:
     parser = build_parser()
     args = parser.parse_args(
