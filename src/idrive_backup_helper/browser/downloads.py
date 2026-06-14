@@ -74,6 +74,7 @@ type OverwriteMode = Literal["skip", "replace", "fail"]
 class FolderTask:
     url: str
     destination: Path
+    expected_folder_name: str | None
 
 
 def _js_asset_path(name: str) -> Path:
@@ -213,6 +214,44 @@ def _wait_for_folder_view_settle(page: Page, timeout_ms: int) -> None:
             return
 
         page.wait_for_timeout(300)
+
+
+def _read_breadcrumb_titles(page: Page) -> list[str]:
+    raw_titles: object = page.evaluate("""
+() => {
+  const breadcrumb = document.querySelector('div.breadcrumb');
+  if (!breadcrumb) {
+    return [];
+  }
+
+  return [...breadcrumb.childNodes]
+    .filter((node) => node.nodeType === 1)
+    .map((node) => node.title || '')
+    .filter((title) => title);
+}
+""")
+    if not isinstance(raw_titles, list):
+        return []
+
+    typed_titles = cast(list[object], raw_titles)
+    return [title for title in typed_titles if isinstance(title, str)]
+
+
+def _ensure_expected_folder_loaded(
+    page: Page, expected_folder_name: str | None
+) -> None:
+    if expected_folder_name is None:
+        return
+
+    breadcrumb_titles = _read_breadcrumb_titles(page)
+    if expected_folder_name in breadcrumb_titles:
+        return
+
+    joined_titles = "/".join(breadcrumb_titles) if breadcrumb_titles else "<empty>"
+    raise RuntimeError(
+        "Loaded folder does not match expected path segment "
+        f"'{expected_folder_name}'. Current breadcrumb: {joined_titles}"
+    )
 
 
 def _download_one_file(
@@ -360,17 +399,19 @@ def download_current_folder(
     downloaded: list[DownloadedFile] = []
     skipped: list[SkippedFile] = []
     failed: list[FailedFile] = []
-    folder_queue: list[FolderTask] = [FolderTask(url=url, destination=destination)]
-    visited_urls: set[str] = set()
+    folder_queue: list[FolderTask] = [
+        FolderTask(url=url, destination=destination, expected_folder_name=None)
+    ]
+    visited_destinations: set[Path] = set()
 
     with BrowserEngine(config) as engine:
         page = engine.new_page()
         while folder_queue:
             folder_task = folder_queue.pop(0)
-            if folder_task.url in visited_urls:
+            if folder_task.destination in visited_destinations:
                 continue
 
-            visited_urls.add(folder_task.url)
+            visited_destinations.add(folder_task.destination)
             ensure_destination_dir(folder_task.destination)
 
             page.goto(folder_task.url, wait_until="domcontentloaded")
@@ -380,6 +421,7 @@ def download_current_folder(
                 allow_interactive_login=not headless,
             )
             _wait_for_folder_view_settle(page, timeout_ms)
+            _ensure_expected_folder_loaded(page, folder_task.expected_folder_name)
             remote_entries = _evaluate_current_folder_entries(page)
             _precheck_overwrite_conflicts(
                 remote_entries.files,
@@ -393,6 +435,7 @@ def download_current_folder(
                     FolderTask(
                         url=remote_folder.href,
                         destination=child_destination,
+                        expected_folder_name=remote_folder.folder_name,
                     )
                 )
 
