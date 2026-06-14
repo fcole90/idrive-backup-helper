@@ -192,10 +192,6 @@ def _evaluate_current_folder_entries(page: Page) -> RemoteEntries:
     return parse_remote_entries(ensure_raw_file_list(raw_files))
 
 
-def _evaluate_current_folder_files(page: Page) -> list[RemoteFile]:
-    return _evaluate_current_folder_entries(page).files
-
-
 def _wait_for_folder_view_settle(page: Page, timeout_ms: int) -> None:
     page.wait_for_selector("#file_list_container", state="attached", timeout=timeout_ms)
 
@@ -268,7 +264,7 @@ def _load_folder_with_retry(
     expected_folder_name: str | None,
 ) -> None:
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
-    last_error = RuntimeError("Folder load retry exhausted")
+    last_error: Exception = RuntimeError("Folder load retry exhausted")
 
     while True:
         try:
@@ -281,7 +277,7 @@ def _load_folder_with_retry(
             _wait_for_folder_view_settle(page, timeout_ms)
             _ensure_expected_folder_loaded(page, expected_folder_name)
             return
-        except RuntimeError as error:
+        except Exception as error:
             last_error = error
 
         if time.monotonic() >= deadline:
@@ -291,6 +287,54 @@ def _load_folder_with_retry(
 
     raise RuntimeError(
         "Failed to load folder after retries "
+        f"({FOLDER_LOAD_RETRY_TIMEOUT_MS // 1000}s limit): {last_error}"
+    )
+
+
+def _load_folder_entries_with_retry(
+    page: Page,
+    *,
+    target_url: str,
+    timeout_ms: int,
+    allow_interactive_login: bool,
+    expected_folder_name: str | None,
+) -> RemoteEntries:
+    deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
+    last_error: Exception = RuntimeError("Folder entries retry exhausted")
+
+    while True:
+        try:
+            _load_folder_with_retry(
+                page,
+                target_url=target_url,
+                timeout_ms=timeout_ms,
+                allow_interactive_login=allow_interactive_login,
+                expected_folder_name=expected_folder_name,
+            )
+            entries = _evaluate_current_folder_entries(page)
+
+            # Child folders that parse as empty right after navigation are
+            # usually not fully rendered yet in IDrive's SPA flow.
+            if (
+                expected_folder_name is not None
+                and not entries.files
+                and not entries.folders
+            ):
+                raise RuntimeError(
+                    "Folder entries still empty after load; waiting and retrying."
+                )
+
+            return entries
+        except Exception as error:
+            last_error = error
+
+        if time.monotonic() >= deadline:
+            break
+
+        page.wait_for_timeout(FOLDER_LOAD_RETRY_INTERVAL_MS)
+
+    raise RuntimeError(
+        "Failed to extract folder entries after retries "
         f"({FOLDER_LOAD_RETRY_TIMEOUT_MS // 1000}s limit): {last_error}"
     )
 
@@ -407,14 +451,14 @@ def list_current_folder_files(
 
     with BrowserEngine(config) as engine:
         page = engine.new_page()
-        _load_folder_with_retry(
+        entries = _load_folder_entries_with_retry(
             page,
             target_url=url,
             timeout_ms=timeout_ms,
             allow_interactive_login=not headless,
             expected_folder_name=None,
         )
-        return _evaluate_current_folder_files(page)
+        return entries.files
 
 
 def download_current_folder(
@@ -455,14 +499,13 @@ def download_current_folder(
             visited_destinations.add(folder_task.destination)
             ensure_destination_dir(folder_task.destination)
 
-            _load_folder_with_retry(
+            remote_entries = _load_folder_entries_with_retry(
                 page,
                 target_url=folder_task.url,
                 timeout_ms=timeout_ms,
                 allow_interactive_login=not headless,
                 expected_folder_name=folder_task.expected_folder_name,
             )
-            remote_entries = _evaluate_current_folder_entries(page)
             _precheck_overwrite_conflicts(
                 remote_entries.files,
                 folder_task.destination,
