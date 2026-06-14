@@ -1,8 +1,8 @@
-/** * Wolf SPA Crawler v0.3.0 - Deep Extraction Protocol
+/** * Wolf SPA Crawler v0.3.1 - Deep Extraction Protocol (Hardened)
  * Run this on https://www.idrive.com/idrive/home/<YOUR_DEVICE_ID>/<VOLUME_ID>/
  */
 (async function () {
-  console.log("Wolf SPA Crawler v0.3.0 Initiated...");
+  console.log("Wolf SPA Crawler v0.3.1 Initiated...");
 
   const CONFIG = {
     SCROLL_INTERVAL: 1500,
@@ -26,7 +26,7 @@
   panel.style.minWidth = "300px";
 
   panel.innerHTML = `
-        <h3 style="margin:0 0 10px 0; color:#ff9800;">Wolf Crawler v0.3.0</h3>
+        <h3 style="margin:0 0 10px 0; color:#ff9800;">Wolf Crawler v0.3.1</h3>
         <label>Search Depth (0 = current only):</label><br>
         <input type="number" id="wolf-depth" value="1" min="0" max="5" style="width:100%; margin:5px 0 15px; padding:5px;"><br>
         <button id="wolf-start" style="width:100%; padding:10px; background:#4caf50; color:white; border:none; cursor:pointer; font-weight:bold;">Start Crawl</button>
@@ -46,8 +46,9 @@
     statusEl.innerText = msg;
   };
 
-  // Synthesize human mouse interactions to bypass jQuery traps
+  // Synthesize human mouse interactions
   const forceClick = (el) => {
+    if (!el) return;
     ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click'].forEach(evt => {
       el.dispatchEvent(new MouseEvent(evt, { view: window, bubbles: true, cancelable: true, buttons: 1 }));
     });
@@ -155,7 +156,6 @@
         await navigateTo(currentTask.pathArray);
         await scrollCurrentView();
 
-        // 3. EXTRACT FOLDERS AND DETAILS (Synchronous UI interaction loop)
         const rows = [...document.querySelectorAll('#file_list_container > li')];
         let currentPathForJson = currentTask.pathArray.join('/');
         if (currentPathForJson && !currentPathForJson.startsWith('/')) {
@@ -164,6 +164,11 @@
 
         for (let i = 0; i < rows.length; i++) {
           let row = rows[i];
+
+          // --- FIX 1: Viewport Alignment ---
+          row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await sleep(600); // Allow scroll transition to settle
+
           let anchor = row.querySelector("a.fldr");
           if (!anchor) continue;
 
@@ -175,13 +180,14 @@
 
           let folderSize = null, fileCount = null, modifiedDate = null;
 
-          // Trigger context menu
-          let menuBtn = row.querySelector('.file_menu_list a');
-          if (menuBtn) {
-            forceClick(menuBtn);
+          // --- FIX 2: Target Precision ---
+          // Dig down to the deepest node (img) to mimic exact human cursor placement
+          let menuTrigger = row.querySelector('.file_menu_list a img') || row.querySelector('.file_menu_list a');
+
+          if (menuTrigger) {
+            forceClick(menuTrigger);
             await sleep(400);
 
-            // Trigger details modal
             let detailsBtn = document.querySelector('ul#content.menu_inside .file_menu_details');
             if (detailsBtn) {
               let parentLi = detailsBtn.closest('li');
@@ -190,7 +196,6 @@
 
               forceClick(detailsBtn);
 
-              // Wait for modal visibility
               let modalVisible = false;
               for (let wait = 0; wait < 15; wait++) {
                 await sleep(200);
@@ -202,7 +207,6 @@
               }
 
               if (modalVisible) {
-                // Poll for server data
                 let sizeEl, countEl, dateEl;
                 let isPopulated = false;
                 for (let attempts = 0; attempts < 20; attempts++) {
@@ -225,11 +229,10 @@
                   console.warn(`[CRAWLER] Timeout waiting for server data on ${title}`);
                 }
 
-                // Close modal
                 let closeBtn = document.querySelector('.popup_close_btn');
                 if (closeBtn) {
                   forceClick(closeBtn);
-                  await sleep(500);
+                  await sleep(400);
                 }
               } else {
                 console.warn(`[CRAWLER] Modal failed to open for ${title}`);
@@ -237,7 +240,11 @@
             }
           }
 
-          // Commit to payload
+          // --- FIX 3: Global State Purge ---
+          // Click empty space to deregister any trailing jQuery hooks before moving to next row
+          forceClick(document.body);
+          await sleep(300);
+
           results.push({
             href: anchor.href,
             title: title,
@@ -248,7 +255,6 @@
             modifiedDate: modifiedDate
           });
 
-          // Enqueue for deeper crawl if limit permits
           if (currentTask.depth < maxDepth) {
             let newPathArray = [...currentTask.pathArray, title];
             queue.push({ pathArray: newPathArray, depth: currentTask.depth + 1 });
@@ -265,16 +271,15 @@
     updateStatus("Crawl Complete. Generating Payload.");
     panel.style.backgroundColor = "#1b5e20";
 
-    // VERSION BUMP AND PAYLOAD GENERATION
     const payload = JSON.stringify({
-      version: "0.3.0",
+      version: "0.3.1",
       basePath: '/' + rootPathArray.join('/'),
       totalDirectoriesFound: results.length,
       dirs: results
     }, null, 2);
 
     let rawPath = rootPathArray.length ? rootPathArray.join('_') : "IDrive_Deep_Export";
-    const safeFileName = rawPath.replace(/[^a-z0-9_-]/gi, '_').replace(/_+/g, '_') + "_v0.3.0.json";
+    const safeFileName = rawPath.replace(/[^a-z0-9_-]/gi, '_').replace(/_+/g, '_') + "_v0.3.1.json";
 
     const blob = new Blob([payload], { type: "application/json" });
     const url = URL.createObjectURL(blob);
