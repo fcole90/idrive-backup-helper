@@ -52,3 +52,23 @@ def test_build_parser_accepts_download_folder_command() -> None:
     assert args.timeout_ms == 120_000
     assert args.cooldown_ms == 1_500
     assert args.overwrite == "skip"
+
+
+def test_build_parser_accepts_verify_manifest_command() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["verify-manifest", "--manifest", "/tmp/run.json"])
+
+    assert args.command == "verify-manifest"
+    assert str(args.manifest) == "/tmp/run.json"
+
+
+def test_build_parser_accepts_retry_manifest_command() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["retry-manifest", "--manifest", "/tmp/run.json"])
+
+    assert args.command == "retry-manifest"
+    assert str(args.manifest) == "/tmp/run.json"
+    assert args.headed is False
+    assert args.timeout_ms == 120_000
+    assert args.cooldown_ms == 1_500
+    assert args.overwrite == "replace"

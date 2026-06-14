@@ -43,12 +43,44 @@ class DownloadedFile:
 class SkippedFile:
     file_name: str
     reason: str
+    final_path: Path | None = None
 
 
 @dataclass(frozen=True)
 class FailedFile:
     file_name: str
     reason: str
+    final_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class ManifestFileRecord:
+    folder_url: str
+    relative_path: str
+    file_name: str
+    final_path: Path
+    server_size_text: str | None
+    server_modified_text: str | None
+
+
+@dataclass(frozen=True)
+class DownloadManifest:
+    manifest_path: Path
+    url: str
+    destination: Path
+    discovered_files: list[ManifestFileRecord]
+
+
+@dataclass(frozen=True)
+class ManifestVerification:
+    manifest_path: Path
+    expected_files: int
+    present_files: int
+    missing_files: list[ManifestFileRecord]
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.missing_files else 0
 
 
 @dataclass(frozen=True)
@@ -60,6 +92,7 @@ class DownloadFolderReport:
     downloaded: list[DownloadedFile]
     skipped: list[SkippedFile]
     failed: list[FailedFile]
+    discovered_files: list[ManifestFileRecord]
     manifest_path: Path
 
     @property
@@ -405,6 +438,11 @@ def build_manifest_path(downloads_dir: Path, started_at: datetime) -> Path:
     return downloads_dir / f"download-folder-run-{timestamp}.json"
 
 
+def build_retry_manifest_path(downloads_dir: Path, started_at: datetime) -> Path:
+    timestamp = started_at.strftime("%Y-%m-%dT%H-%M-%S")
+    return downloads_dir / f"retry-manifest-run-{timestamp}.json"
+
+
 def ensure_destination_dir(destination: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     return destination
@@ -417,6 +455,13 @@ def _serialize_path(path: Path, repo_root: Path) -> str:
         return str(path)
 
 
+def _relative_path_from_destination(base_destination: Path, final_path: Path) -> str:
+    try:
+        return str(final_path.relative_to(base_destination))
+    except ValueError:
+        return final_path.name
+
+
 def _write_manifest(report: DownloadFolderReport, repo_root: Path) -> None:
     manifest = {
         "version": "poc-download-folder-1.0",
@@ -427,23 +472,135 @@ def _write_manifest(report: DownloadFolderReport, repo_root: Path) -> None:
         "downloaded": [
             {
                 "fileName": item.file_name,
+                "relativePath": _relative_path_from_destination(
+                    report.destination,
+                    item.final_path,
+                ),
                 "stagedPath": _serialize_path(item.staged_path, repo_root),
                 "finalPath": str(item.final_path),
             }
             for item in report.downloaded
         ],
         "skipped": [
-            {"fileName": item.file_name, "reason": item.reason}
+            {
+                "fileName": item.file_name,
+                "reason": item.reason,
+                "finalPath": (
+                    str(item.final_path) if item.final_path is not None else None
+                ),
+            }
             for item in report.skipped
         ],
         "failed": [
-            {"fileName": item.file_name, "reason": item.reason}
+            {
+                "fileName": item.file_name,
+                "reason": item.reason,
+                "finalPath": (
+                    str(item.final_path) if item.final_path is not None else None
+                ),
+            }
             for item in report.failed
+        ],
+        "discoveredFiles": [
+            {
+                "folderUrl": item.folder_url,
+                "relativePath": item.relative_path,
+                "fileName": item.file_name,
+                "finalPath": str(item.final_path),
+                "serverSizeText": item.server_size_text,
+                "serverModifiedText": item.server_modified_text,
+            }
+            for item in report.discovered_files
         ],
     }
     report.manifest_path.write_text(
         json.dumps(manifest, indent=2) + "\n",
         encoding="utf-8",
+    )
+
+
+def load_download_manifest(manifest_path: Path) -> DownloadManifest:
+    raw_object = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_object, dict):
+        raise RuntimeError("Manifest must contain a JSON object.")
+
+    raw_data = cast(dict[object, object], raw_object)
+
+    url = raw_data.get("url")
+    destination = raw_data.get("destination")
+    discovered_files = raw_data.get("discoveredFiles")
+
+    if not isinstance(url, str) or not url:
+        raise RuntimeError("Manifest is missing a valid 'url'.")
+    if not isinstance(destination, str) or not destination:
+        raise RuntimeError("Manifest is missing a valid 'destination'.")
+    if not isinstance(discovered_files, list):
+        raise RuntimeError(
+            "Manifest lacks discoveredFiles inventory. Re-run download-folder with the current version first."
+        )
+
+    discovered_file_objects = cast(list[object], discovered_files)
+
+    parsed_discovered_files: list[ManifestFileRecord] = []
+    for index, item_object in enumerate(discovered_file_objects):
+        if not isinstance(item_object, dict):
+            raise RuntimeError(f"Invalid discoveredFiles item at index {index}.")
+
+        item = cast(dict[object, object], item_object)
+
+        folder_url = item.get("folderUrl")
+        relative_path = item.get("relativePath")
+        file_name = item.get("fileName")
+        final_path = item.get("finalPath")
+        server_size_text = item.get("serverSizeText")
+        server_modified_text = item.get("serverModifiedText")
+
+        if not isinstance(folder_url, str) or not folder_url:
+            raise RuntimeError(f"Invalid folderUrl at index {index}.")
+        if not isinstance(relative_path, str) or not relative_path:
+            raise RuntimeError(f"Invalid relativePath at index {index}.")
+        if not isinstance(file_name, str) or not file_name:
+            raise RuntimeError(f"Invalid fileName at index {index}.")
+        if not isinstance(final_path, str) or not final_path:
+            raise RuntimeError(f"Invalid finalPath at index {index}.")
+        if server_size_text is not None and not isinstance(server_size_text, str):
+            raise RuntimeError(f"Invalid serverSizeText at index {index}.")
+        if server_modified_text is not None and not isinstance(
+            server_modified_text, str
+        ):
+            raise RuntimeError(f"Invalid serverModifiedText at index {index}.")
+
+        parsed_discovered_files.append(
+            ManifestFileRecord(
+                folder_url=folder_url,
+                relative_path=relative_path,
+                file_name=file_name,
+                final_path=Path(final_path),
+                server_size_text=server_size_text,
+                server_modified_text=server_modified_text,
+            )
+        )
+
+    return DownloadManifest(
+        manifest_path=manifest_path,
+        url=url,
+        destination=Path(destination),
+        discovered_files=parsed_discovered_files,
+    )
+
+
+def verify_download_manifest(manifest_path: Path) -> ManifestVerification:
+    manifest = load_download_manifest(manifest_path)
+    missing_files = [
+        item for item in manifest.discovered_files if not item.final_path.exists()
+    ]
+    present_files = len(manifest.discovered_files) - len(missing_files)
+
+    return ManifestVerification(
+        manifest_path=manifest_path,
+        expected_files=len(manifest.discovered_files),
+        present_files=present_files,
+        missing_files=missing_files,
     )
 
 
@@ -515,6 +672,7 @@ def download_current_folder(
     downloaded: list[DownloadedFile] = []
     skipped: list[SkippedFile] = []
     failed: list[FailedFile] = []
+    discovered_files: list[ManifestFileRecord] = []
     folder_queue: list[FolderTask] = [
         FolderTask(url=url, destination=destination, expected_folder_name=None)
     ]
@@ -563,12 +721,26 @@ def download_current_folder(
 
             for remote_file in remote_entries.files:
                 final_path = folder_task.destination / remote_file.file_name
+                discovered_files.append(
+                    ManifestFileRecord(
+                        folder_url=folder_task.url,
+                        relative_path=_relative_path_from_destination(
+                            destination,
+                            final_path,
+                        ),
+                        file_name=remote_file.file_name,
+                        final_path=final_path,
+                        server_size_text=remote_file.server_size_text,
+                        server_modified_text=remote_file.server_modified_text,
+                    )
+                )
                 if final_path.exists() and overwrite_mode == "skip":
                     _log(f"Skipping existing file: {final_path}")
                     skipped.append(
                         SkippedFile(
                             file_name=remote_file.file_name,
                             reason="destination exists",
+                            final_path=final_path,
                         )
                     )
                     continue
@@ -593,6 +765,7 @@ def download_current_folder(
                         FailedFile(
                             file_name=remote_file.file_name,
                             reason=str(error),
+                            final_path=final_path,
                         )
                     )
                     continue
@@ -616,7 +789,140 @@ def download_current_folder(
         downloaded=downloaded,
         skipped=skipped,
         failed=failed,
+        discovered_files=discovered_files,
         manifest_path=manifest_path,
     )
     _write_manifest(report, repo_root)
+    return report
+
+
+def retry_missing_files_from_manifest(
+    *,
+    profile_dir: Path,
+    downloads_dir: Path,
+    manifest_path: Path,
+    headless: bool,
+    timeout_ms: int,
+    cooldown_ms: int,
+    overwrite: str,
+) -> DownloadFolderReport:
+    manifest = load_download_manifest(manifest_path)
+    targets = [
+        item for item in manifest.discovered_files if not item.final_path.exists()
+    ]
+    overwrite_mode = cast(OverwriteMode, overwrite)
+    started_at = datetime.now()
+    downloaded: list[DownloadedFile] = []
+    skipped: list[SkippedFile] = []
+    failed: list[FailedFile] = []
+
+    if not targets:
+        report = DownloadFolderReport(
+            url=manifest.url,
+            destination=manifest.destination,
+            started_at=started_at,
+            finished_at=datetime.now(),
+            downloaded=[],
+            skipped=[],
+            failed=[],
+            discovered_files=[],
+            manifest_path=build_retry_manifest_path(downloads_dir, started_at),
+        )
+        _write_manifest(report, downloads_dir.parents[2])
+        return report
+
+    grouped_targets: dict[tuple[str, Path], list[ManifestFileRecord]] = {}
+    for item in targets:
+        key = (item.folder_url, item.final_path.parent)
+        grouped_targets.setdefault(key, []).append(item)
+
+    config = BrowserConfig(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        headless=headless,
+        timeout_ms=timeout_ms,
+    )
+
+    with BrowserEngine(config) as engine:
+        page = engine.new_page()
+        for (folder_url, destination_dir), grouped_items in grouped_targets.items():
+            _log(f"Retrying {len(grouped_items)} file(s) from folder: {folder_url}")
+            remote_entries = _load_folder_entries_with_retry(
+                page,
+                target_url=folder_url,
+                timeout_ms=timeout_ms,
+                allow_interactive_login=not headless,
+                expected_folder_name=None,
+            )
+            available_files = {item.file_name for item in remote_entries.files}
+
+            for item in grouped_items:
+                if item.final_path.exists() and overwrite_mode == "skip":
+                    skipped.append(
+                        SkippedFile(
+                            file_name=item.file_name,
+                            reason="destination exists",
+                            final_path=item.final_path,
+                        )
+                    )
+                    continue
+
+                if item.file_name not in available_files:
+                    failed.append(
+                        FailedFile(
+                            file_name=item.file_name,
+                            reason="File no longer present in remote folder view",
+                            final_path=item.final_path,
+                        )
+                    )
+                    continue
+
+                try:
+                    staged_path = _download_one_file(
+                        page,
+                        RemoteFile(
+                            file_name=item.file_name,
+                            row_index=-1,
+                            server_size_text=item.server_size_text,
+                            server_modified_text=item.server_modified_text,
+                        ),
+                        downloads_dir,
+                        cooldown_ms,
+                    )
+                    moved_path = move_download_to_destination(
+                        staged_path,
+                        destination_dir,
+                        item.file_name,
+                        replace_existing=overwrite_mode == "replace",
+                    )
+                except (OSError, RuntimeError) as error:
+                    failed.append(
+                        FailedFile(
+                            file_name=item.file_name,
+                            reason=str(error),
+                            final_path=item.final_path,
+                        )
+                    )
+                    continue
+
+                downloaded.append(
+                    DownloadedFile(
+                        file_name=item.file_name,
+                        staged_path=staged_path,
+                        final_path=moved_path,
+                    )
+                )
+
+    report = DownloadFolderReport(
+        url=manifest.url,
+        destination=manifest.destination,
+        started_at=started_at,
+        finished_at=datetime.now(),
+        downloaded=downloaded,
+        skipped=skipped,
+        failed=failed,
+        discovered_files=targets,
+        manifest_path=build_retry_manifest_path(downloads_dir, started_at),
+    )
+    _write_manifest(report, downloads_dir.parents[2])
     return report
