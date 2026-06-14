@@ -26,8 +26,18 @@ async ({ scrollIntervalMs, maxIdleTicks }) => {
 
   return [...document.querySelectorAll("#file_list_container > li")]
     .map((row, rowIndex) => {
-      if (row.querySelector("a.fldr")) {
-        return null;
+      const folderAnchor = row.querySelector("a.fldr");
+      if (folderAnchor) {
+        const folderName = folderAnchor.getAttribute("title") || folderAnchor.textContent.trim();
+        if (!folderName) {
+          return null;
+        }
+
+        return {
+          entryType: "folder",
+          folderName,
+          href: folderAnchor.href,
+        };
       }
 
       const nameEl = row.querySelector(".file_name a") || row.querySelector(".file_name span");
@@ -40,6 +50,7 @@ async ({ scrollIntervalMs, maxIdleTicks }) => {
       const dateEl = row.querySelector(".file_date");
 
       return {
+        entryType: "file",
         fileName,
         rowIndex,
         serverSizeText: sizeEl ? sizeEl.textContent.trim() : null,

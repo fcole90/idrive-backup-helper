@@ -20,6 +20,18 @@ class RemoteFile:
 
 
 @dataclass(frozen=True)
+class RemoteFolder:
+    folder_name: str
+    href: str
+
+
+@dataclass(frozen=True)
+class RemoteEntries:
+    files: list[RemoteFile]
+    folders: list[RemoteFolder]
+
+
+@dataclass(frozen=True)
 class DownloadedFile:
     file_name: str
     staged_path: Path
@@ -57,6 +69,12 @@ class DownloadFolderReport:
 type OverwriteMode = Literal["skip", "replace", "fail"]
 
 
+@dataclass(frozen=True)
+class FolderTask:
+    url: str
+    destination: Path
+
+
 def _js_asset_path(name: str) -> Path:
     return Path(__file__).resolve().parent / "js" / name
 
@@ -92,10 +110,11 @@ def ensure_raw_file_list(raw_files: object) -> list[object]:
     return cast(list[object], raw_files)
 
 
-def parse_remote_files(raw_files: list[object]) -> list[RemoteFile]:
+def parse_remote_entries(raw_entries: list[object]) -> RemoteEntries:
+    files: list[RemoteFile] = []
+    folders: list[RemoteFolder] = []
 
-    parsed: list[RemoteFile] = []
-    for index, item_object in enumerate(raw_files):
+    for index, item_object in enumerate(raw_entries):
         if not isinstance(item_object, dict):
             raise ValueError(f"Invalid file item at index {index}: expected object.")
 
@@ -105,35 +124,56 @@ def parse_remote_files(raw_files: list[object]) -> list[RemoteFile]:
             if isinstance(key_object, str):
                 normalized_item[key_object] = value_object
 
-        file_name = normalized_item.get("fileName")
-        row_index = normalized_item.get("rowIndex")
-        server_size_text = normalized_item.get("serverSizeText")
-        server_modified_text = normalized_item.get("serverModifiedText")
+        entry_type = normalized_item.get("entryType")
+        if entry_type == "file":
+            file_name = normalized_item.get("fileName")
+            row_index = normalized_item.get("rowIndex")
+            server_size_text = normalized_item.get("serverSizeText")
+            server_modified_text = normalized_item.get("serverModifiedText")
 
-        if not isinstance(file_name, str) or not file_name.strip():
-            raise ValueError(f"Invalid fileName at index {index}.")
-        if not isinstance(row_index, int):
-            raise ValueError(f"Invalid rowIndex at index {index}.")
-        if server_size_text is not None and not isinstance(server_size_text, str):
-            raise ValueError(f"Invalid serverSizeText at index {index}.")
-        if server_modified_text is not None and not isinstance(
-            server_modified_text, str
-        ):
-            raise ValueError(f"Invalid serverModifiedText at index {index}.")
+            if not isinstance(file_name, str) or not file_name.strip():
+                raise ValueError(f"Invalid fileName at index {index}.")
+            if not isinstance(row_index, int):
+                raise ValueError(f"Invalid rowIndex at index {index}.")
+            if server_size_text is not None and not isinstance(server_size_text, str):
+                raise ValueError(f"Invalid serverSizeText at index {index}.")
+            if server_modified_text is not None and not isinstance(
+                server_modified_text, str
+            ):
+                raise ValueError(f"Invalid serverModifiedText at index {index}.")
 
-        parsed.append(
-            RemoteFile(
-                file_name=file_name,
-                row_index=row_index,
-                server_size_text=server_size_text,
-                server_modified_text=server_modified_text,
+            files.append(
+                RemoteFile(
+                    file_name=file_name,
+                    row_index=row_index,
+                    server_size_text=server_size_text,
+                    server_modified_text=server_modified_text,
+                )
             )
-        )
+            continue
 
-    return parsed
+        if entry_type == "folder":
+            folder_name = normalized_item.get("folderName")
+            href = normalized_item.get("href")
+
+            if not isinstance(folder_name, str) or not folder_name.strip():
+                raise ValueError(f"Invalid folderName at index {index}.")
+            if not isinstance(href, str) or not href.strip():
+                raise ValueError(f"Invalid href at index {index}.")
+
+            folders.append(RemoteFolder(folder_name=folder_name, href=href))
+            continue
+
+        raise ValueError(f"Invalid entryType at index {index}.")
+
+    return RemoteEntries(files=files, folders=folders)
 
 
-def _evaluate_current_folder_files(page: Page) -> list[RemoteFile]:
+def parse_remote_files(raw_files: list[object]) -> list[RemoteFile]:
+    return parse_remote_entries(raw_files).files
+
+
+def _evaluate_current_folder_entries(page: Page) -> RemoteEntries:
     script = _load_js_asset("list_current_folder_files.js")
     raw_files: object = page.evaluate(
         script,
@@ -142,7 +182,11 @@ def _evaluate_current_folder_files(page: Page) -> list[RemoteFile]:
             "maxIdleTicks": 3,
         },
     )
-    return parse_remote_files(ensure_raw_file_list(raw_files))
+    return parse_remote_entries(ensure_raw_file_list(raw_files))
+
+
+def _evaluate_current_folder_files(page: Page) -> list[RemoteFile]:
+    return _evaluate_current_folder_entries(page).files
 
 
 def _download_one_file(
@@ -289,58 +333,81 @@ def download_current_folder(
     downloaded: list[DownloadedFile] = []
     skipped: list[SkippedFile] = []
     failed: list[FailedFile] = []
+    folder_queue: list[FolderTask] = [FolderTask(url=url, destination=destination)]
+    visited_urls: set[str] = set()
 
     with BrowserEngine(config) as engine:
         page = engine.new_page()
-        page.goto(url, wait_until="domcontentloaded")
-        ensure_authenticated_page(
-            page,
-            target_url=url,
-            allow_interactive_login=not headless,
-        )
-        remote_files = _evaluate_current_folder_files(page)
-        _precheck_overwrite_conflicts(remote_files, destination, overwrite_mode)
-
-        for remote_file in remote_files:
-            final_path = destination / remote_file.file_name
-            if final_path.exists() and overwrite_mode == "skip":
-                skipped.append(
-                    SkippedFile(
-                        file_name=remote_file.file_name,
-                        reason="destination exists",
-                    )
-                )
+        while folder_queue:
+            folder_task = folder_queue.pop(0)
+            if folder_task.url in visited_urls:
                 continue
 
-            try:
-                staged_path = _download_one_file(
-                    page,
-                    remote_file,
-                    downloads_dir,
-                    cooldown_ms,
-                )
-                moved_path = move_download_to_destination(
-                    staged_path,
-                    destination,
-                    remote_file.file_name,
-                    replace_existing=overwrite_mode == "replace",
-                )
-            except (OSError, RuntimeError) as error:
-                failed.append(
-                    FailedFile(
-                        file_name=remote_file.file_name,
-                        reason=str(error),
-                    )
-                )
-                continue
+            visited_urls.add(folder_task.url)
+            ensure_destination_dir(folder_task.destination)
 
-            downloaded.append(
-                DownloadedFile(
-                    file_name=remote_file.file_name,
-                    staged_path=staged_path,
-                    final_path=moved_path,
-                )
+            page.goto(folder_task.url, wait_until="domcontentloaded")
+            ensure_authenticated_page(
+                page,
+                target_url=folder_task.url,
+                allow_interactive_login=not headless,
             )
+            remote_entries = _evaluate_current_folder_entries(page)
+            _precheck_overwrite_conflicts(
+                remote_entries.files,
+                folder_task.destination,
+                overwrite_mode,
+            )
+
+            for remote_folder in remote_entries.folders:
+                child_destination = folder_task.destination / remote_folder.folder_name
+                folder_queue.append(
+                    FolderTask(
+                        url=remote_folder.href,
+                        destination=child_destination,
+                    )
+                )
+
+            for remote_file in remote_entries.files:
+                final_path = folder_task.destination / remote_file.file_name
+                if final_path.exists() and overwrite_mode == "skip":
+                    skipped.append(
+                        SkippedFile(
+                            file_name=remote_file.file_name,
+                            reason="destination exists",
+                        )
+                    )
+                    continue
+
+                try:
+                    staged_path = _download_one_file(
+                        page,
+                        remote_file,
+                        downloads_dir,
+                        cooldown_ms,
+                    )
+                    moved_path = move_download_to_destination(
+                        staged_path,
+                        folder_task.destination,
+                        remote_file.file_name,
+                        replace_existing=overwrite_mode == "replace",
+                    )
+                except (OSError, RuntimeError) as error:
+                    failed.append(
+                        FailedFile(
+                            file_name=remote_file.file_name,
+                            reason=str(error),
+                        )
+                    )
+                    continue
+
+                downloaded.append(
+                    DownloadedFile(
+                        file_name=remote_file.file_name,
+                        staged_path=staged_path,
+                        final_path=moved_path,
+                    )
+                )
 
     finished_at = datetime.now()
     repo_root = downloads_dir.parents[2]

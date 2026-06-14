@@ -3,9 +3,11 @@ import pytest
 from idrive_backup_helper.browser.downloads import (
     DownloadFolderReport,
     FailedFile,
+    RemoteFolder,
     build_manifest_path,
     ensure_destination_dir,
     ensure_raw_file_list,
+    parse_remote_entries,
     parse_remote_files,
 )
 from datetime import datetime
@@ -15,6 +17,7 @@ from pathlib import Path
 def test_parse_remote_files_accepts_valid_payload() -> None:
     payload = [
         {
+            "entryType": "file",
             "fileName": "example.pdf",
             "rowIndex": 3,
             "serverSizeText": "12.4 MB",
@@ -30,7 +33,7 @@ def test_parse_remote_files_accepts_valid_payload() -> None:
 
 
 def test_parse_remote_files_rejects_missing_file_name() -> None:
-    payload = [{"rowIndex": 0}]
+    payload = [{"entryType": "file", "rowIndex": 0}]
 
     with pytest.raises(ValueError, match="fileName"):
         parse_remote_files(ensure_raw_file_list(payload))
@@ -39,6 +42,32 @@ def test_parse_remote_files_rejects_missing_file_name() -> None:
 def test_parse_remote_files_rejects_non_list_payload() -> None:
     with pytest.raises(ValueError, match="JSON array"):
         ensure_raw_file_list({"fileName": "bad"})
+
+
+def test_parse_remote_entries_collects_folders_and_files() -> None:
+    payload = [
+        {
+            "entryType": "folder",
+            "folderName": "photos",
+            "href": "https://example.com/photos",
+        },
+        {
+            "entryType": "file",
+            "fileName": "example.pdf",
+            "rowIndex": 3,
+            "serverSizeText": "12.4 MB",
+            "serverModifiedText": "06/10/2026 14:02",
+        },
+    ]
+
+    entries = parse_remote_entries(ensure_raw_file_list(payload))
+
+    assert len(entries.folders) == 1
+    assert entries.folders[0] == RemoteFolder(
+        folder_name="photos",
+        href="https://example.com/photos",
+    )
+    assert len(entries.files) == 1
 
 
 def test_build_manifest_path_uses_expected_file_name() -> None:
