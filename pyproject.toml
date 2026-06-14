@@ -6,7 +6,9 @@ authors = [{ name = "Name Surname", email = "email@example.com" }]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.14,<4.0"
-dependencies = []
+dependencies = [
+    "playwright>=1.60.0",
+]
 
 [dependency-groups]
 dev = [

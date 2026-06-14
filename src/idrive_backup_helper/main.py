@@ -1,6 +1,9 @@
-def some_function() -> str:
-    return "Hello, World!"
+from idrive_backup_helper.cli import main as cli_main
 
 
-def main() -> None:
-    print(some_function())
+def main() -> int:
+    return cli_main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

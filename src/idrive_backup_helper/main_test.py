@@ -1,6 +1,7 @@
-# Mock test
-from idrive_backup_helper.main import some_function
+import idrive_backup_helper.main as main_module
+from pytest import MonkeyPatch
 
 
-def test_some_function():
-    assert some_function() == "Hello, World!"
+def test_main_delegates_to_cli(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module, "cli_main", lambda: 7)
+    assert main_module.main() == 7
