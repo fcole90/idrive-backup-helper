@@ -69,6 +69,9 @@ class DownloadFolderReport:
 
 type OverwriteMode = Literal["skip", "replace", "fail"]
 
+FOLDER_SETTLE_POLL_MS = 1_000
+FOLDER_SETTLE_STABLE_TICKS = 10
+
 
 @dataclass(frozen=True)
 class FolderTask:
@@ -210,10 +213,10 @@ def _wait_for_folder_view_settle(page: Page, timeout_ms: int) -> None:
             stable_ticks = 0
             last_row_count = row_count
 
-        if stable_ticks >= 3:
+        if stable_ticks >= FOLDER_SETTLE_STABLE_TICKS:
             return
 
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(FOLDER_SETTLE_POLL_MS)
 
 
 def _read_breadcrumb_titles(page: Page) -> list[str]:
