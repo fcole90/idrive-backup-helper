@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
+import time
 from typing import Literal, cast
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
@@ -189,6 +190,31 @@ def _evaluate_current_folder_files(page: Page) -> list[RemoteFile]:
     return _evaluate_current_folder_entries(page).files
 
 
+def _wait_for_folder_view_settle(page: Page, timeout_ms: int) -> None:
+    page.wait_for_selector("#file_list_container", state="attached", timeout=timeout_ms)
+
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    stable_ticks = 0
+    last_row_count = -1
+
+    while time.monotonic() < deadline:
+        row_count_obj: object = page.evaluate(
+            "() => document.querySelectorAll('#file_list_container > li').length"
+        )
+        row_count = int(row_count_obj) if isinstance(row_count_obj, int) else 0
+
+        if row_count == last_row_count:
+            stable_ticks += 1
+        else:
+            stable_ticks = 0
+            last_row_count = row_count
+
+        if stable_ticks >= 3:
+            return
+
+        page.wait_for_timeout(300)
+
+
 def _download_one_file(
     page: Page,
     remote_file: RemoteFile,
@@ -307,6 +333,7 @@ def list_current_folder_files(
             target_url=url,
             allow_interactive_login=not headless,
         )
+        _wait_for_folder_view_settle(page, timeout_ms)
         return _evaluate_current_folder_files(page)
 
 
@@ -352,6 +379,7 @@ def download_current_folder(
                 target_url=folder_task.url,
                 allow_interactive_login=not headless,
             )
+            _wait_for_folder_view_settle(page, timeout_ms)
             remote_entries = _evaluate_current_folder_entries(page)
             _precheck_overwrite_conflicts(
                 remote_entries.files,
