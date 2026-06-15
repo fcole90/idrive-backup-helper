@@ -5,7 +5,11 @@ from pathlib import Path
 import time
 from typing import Literal, cast
 
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    Error as PlaywrightError,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 from idrive_backup_helper.browser.session import ensure_authenticated_page
@@ -426,9 +430,18 @@ def _download_one_file(
         raise RuntimeError(
             f"Timed out waiting for download: {remote_file.file_name}"
         ) from error
+    except PlaywrightError as error:
+        raise RuntimeError(
+            f"Download canceled by browser/session: {remote_file.file_name} ({error})"
+        ) from error
 
     staged_path = staging_dir / download.suggested_filename
-    download.save_as(str(staged_path))
+    try:
+        download.save_as(str(staged_path))
+    except PlaywrightError as error:
+        raise RuntimeError(
+            f"Failed saving download: {remote_file.file_name} ({error})"
+        ) from error
     _log(f"Staged download complete: {remote_file.file_name} -> {staged_path}")
     return staged_path
 
