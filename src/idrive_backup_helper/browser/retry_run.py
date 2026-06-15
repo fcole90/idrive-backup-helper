@@ -17,7 +17,6 @@ from idrive_backup_helper.browser.download_models import (
     SkippedFile,
 )
 from idrive_backup_helper.browser.download_page import (
-    download_one_file,
     load_folder_entries_with_retry,
 )
 from idrive_backup_helper.browser.download_progress import (
@@ -25,8 +24,10 @@ from idrive_backup_helper.browser.download_progress import (
     build_progress_log_path,
     log_download_message,
 )
+from idrive_backup_helper.browser.download_transfer import (
+    transfer_remote_file_to_destination,
+)
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
-from idrive_backup_helper.filesystem.moves import move_download_to_destination
 
 
 def retry_missing_files_from_manifest(
@@ -169,22 +170,18 @@ def retry_missing_files_from_manifest(
                         relativePath=item.relative_path,
                     )
                     try:
-                        staged_path = download_one_file(
-                            page,
-                            RemoteFile(
+                        downloaded_file = transfer_remote_file_to_destination(
+                            page=page,
+                            remote_file=RemoteFile(
                                 file_name=item.file_name,
                                 row_index=-1,
                                 server_size_text=item.server_size_text,
                                 server_modified_text=item.server_modified_text,
                             ),
-                            downloads_dir,
-                            cooldown_ms,
-                        )
-                        moved_path = move_download_to_destination(
-                            staged_path,
-                            destination_dir,
-                            item.file_name,
+                            downloads_dir=downloads_dir,
+                            destination_dir=destination_dir,
                             replace_existing=overwrite_mode == "replace",
+                            cooldown_ms=cooldown_ms,
                         )
                     except (OSError, RuntimeError) as error:
                         progress_logger.log(
@@ -206,16 +203,10 @@ def retry_missing_files_from_manifest(
                         "file_downloaded",
                         fileName=item.file_name,
                         relativePath=item.relative_path,
-                        stagedPath=str(staged_path),
-                        finalPath=str(moved_path),
+                        stagedPath=str(downloaded_file.staged_path),
+                        finalPath=str(downloaded_file.final_path),
                     )
-                    downloaded.append(
-                        DownloadedFile(
-                            file_name=item.file_name,
-                            staged_path=staged_path,
-                            final_path=moved_path,
-                        )
-                    )
+                    downloaded.append(downloaded_file)
     except Exception as error:
         progress_logger.log("run_failed", reason=str(error))
         raise

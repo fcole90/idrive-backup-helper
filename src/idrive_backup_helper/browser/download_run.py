@@ -22,7 +22,6 @@ from idrive_backup_helper.browser.download_models import (
     SkippedFile,
 )
 from idrive_backup_helper.browser.download_page import (
-    download_one_file,
     load_folder_entries_with_retry,
 )
 from idrive_backup_helper.browser.download_progress import (
@@ -30,8 +29,10 @@ from idrive_backup_helper.browser.download_progress import (
     build_progress_log_path,
     log_download_message,
 )
+from idrive_backup_helper.browser.download_transfer import (
+    transfer_remote_file_to_destination,
+)
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
-from idrive_backup_helper.filesystem.moves import move_download_to_destination
 
 
 def _precheck_overwrite_conflicts(
@@ -251,20 +252,17 @@ def download_current_folder(
                         relativePath=relative_path,
                     )
                     try:
-                        staged_path = download_one_file(
-                            page,
-                            remote_file,
-                            downloads_dir,
-                            cooldown_ms,
-                        )
-                        moved_path = move_download_to_destination(
-                            staged_path,
-                            folder_task.destination,
-                            remote_file.file_name,
+                        downloaded_file = transfer_remote_file_to_destination(
+                            page=page,
+                            remote_file=remote_file,
+                            downloads_dir=downloads_dir,
+                            destination_dir=folder_task.destination,
                             replace_existing=overwrite_mode == "replace",
+                            cooldown_ms=cooldown_ms,
                         )
                         log_download_message(
-                            f"Moved download to destination: {moved_path}"
+                            "Moved download to destination: "
+                            f"{downloaded_file.final_path}"
                         )
                     except (OSError, RuntimeError) as error:
                         log_download_message(
@@ -289,16 +287,10 @@ def download_current_folder(
                         "file_downloaded",
                         fileName=remote_file.file_name,
                         relativePath=relative_path,
-                        stagedPath=str(staged_path),
-                        finalPath=str(moved_path),
+                        stagedPath=str(downloaded_file.staged_path),
+                        finalPath=str(downloaded_file.final_path),
                     )
-                    downloaded.append(
-                        DownloadedFile(
-                            file_name=remote_file.file_name,
-                            staged_path=staged_path,
-                            final_path=moved_path,
-                        )
-                    )
+                    downloaded.append(downloaded_file)
     except Exception as error:
         progress_logger.log("run_failed", reason=str(error))
         raise
