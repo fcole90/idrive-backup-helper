@@ -23,6 +23,7 @@ FOLDER_SETTLE_POLL_MS = 1_000
 FOLDER_SETTLE_STABLE_TICKS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120_000
+EMPTY_FOLDER_CONFIRM_ATTEMPTS = 2
 
 
 def _log(message: str) -> None:
@@ -196,12 +197,18 @@ def load_folder_entries_with_retry(
     if use_folder_cache:
         cached_entries = load_folder_entries_cache(downloads_dir, target_url)
         if cached_entries is not None:
-            _log(
-                "Using cached folder entries: "
-                f"{target_url} ({len(cached_entries.files)} file(s), "
-                f"{len(cached_entries.folders)} folder(s))"
-            )
-            return cached_entries
+            if not cached_entries.files and not cached_entries.folders:
+                _log(
+                    "Ignoring empty cached folder entries and reloading: "
+                    f"{target_url}"
+                )
+            else:
+                _log(
+                    "Using cached folder entries: "
+                    f"{target_url} ({len(cached_entries.files)} file(s), "
+                    f"{len(cached_entries.folders)} folder(s))"
+                )
+                return cached_entries
 
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder entries retry exhausted")
@@ -221,16 +228,19 @@ def load_folder_entries_with_retry(
                 f"Folder entries attempt {attempt}: found {len(entries.files)} file(s), "
                 f"{len(entries.folders)} folder(s)"
             )
-            write_folder_entries_cache(downloads_dir, target_url, entries)
+            if not entries.files and not entries.folders:
+                if attempt < EMPTY_FOLDER_CONFIRM_ATTEMPTS:
+                    raise RuntimeError(
+                        "Folder entries are empty; confirming with another attempt."
+                    )
 
-            if (
-                expected_folder_name is not None
-                and not entries.files
-                and not entries.folders
-            ):
-                raise RuntimeError(
-                    "Folder entries still empty after load; waiting and retrying."
+                _log(
+                    "Folder entries still empty after confirmation; "
+                    "treating as empty folder and skipping cache write."
                 )
+                return entries
+
+            write_folder_entries_cache(downloads_dir, target_url, entries)
 
             return entries
         except Exception as error:
