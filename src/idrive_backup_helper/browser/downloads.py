@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -121,6 +122,177 @@ class FolderTask:
 
 def _log(message: str) -> None:
     print(f"[download-folder] {message}", flush=True)
+
+
+def _folder_cache_dir(downloads_dir: Path) -> Path:
+    return downloads_dir / "folder-cache"
+
+
+def _folder_cache_path(downloads_dir: Path, folder_url: str) -> Path:
+    url_hash = hashlib.sha256(folder_url.encode("utf-8")).hexdigest()
+    return _folder_cache_dir(downloads_dir) / f"{url_hash}.json"
+
+
+def _serialize_remote_entries(entries: RemoteEntries) -> list[dict[str, object]]:
+    serialized: list[dict[str, object]] = []
+    for remote_folder in entries.folders:
+        serialized.append(
+            {
+                "entryType": "folder",
+                "folderName": remote_folder.folder_name,
+                "href": remote_folder.href,
+            }
+        )
+    for remote_file in entries.files:
+        serialized.append(
+            {
+                "entryType": "file",
+                "fileName": remote_file.file_name,
+                "rowIndex": remote_file.row_index,
+                "serverSizeText": remote_file.server_size_text,
+                "serverModifiedText": remote_file.server_modified_text,
+            }
+        )
+    return serialized
+
+
+def write_folder_entries_cache(
+    downloads_dir: Path,
+    folder_url: str,
+    entries: RemoteEntries,
+) -> None:
+    cache_dir = _folder_cache_dir(downloads_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = _folder_cache_path(downloads_dir, folder_url)
+    payload = {
+        "url": folder_url,
+        "cachedAt": datetime.now().isoformat(timespec="seconds"),
+        "entries": _serialize_remote_entries(entries),
+    }
+    cache_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def load_folder_entries_cache(
+    downloads_dir: Path,
+    folder_url: str,
+) -> RemoteEntries | None:
+    cache_path = _folder_cache_path(downloads_dir, folder_url)
+    if not cache_path.exists():
+        return None
+
+    try:
+        payload_object = json.loads(cache_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload_object, dict):
+        return None
+
+    payload = cast(dict[object, object], payload_object)
+    entries_object = payload.get("entries")
+    if not isinstance(entries_object, list):
+        return None
+
+    try:
+        return parse_remote_entries(ensure_raw_file_list(entries_object))
+    except ValueError:
+        return None
+
+
+def _manifest_paths(downloads_dir: Path) -> list[Path]:
+    return sorted(
+        [
+            *downloads_dir.glob("download-folder-run-*.json"),
+            *downloads_dir.glob("retry-manifest-run-*.json"),
+        ]
+    )
+
+
+def _manifest_sort_key(manifest_path: Path) -> tuple[str, float]:
+    try:
+        payload_object = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if isinstance(payload_object, dict):
+            payload = cast(dict[object, object], payload_object)
+            finished_at = payload.get("finishedAt")
+            if isinstance(finished_at, str):
+                return (finished_at, manifest_path.stat().st_mtime)
+    except OSError, json.JSONDecodeError:
+        pass
+
+    return ("", manifest_path.stat().st_mtime)
+
+
+def _extract_relative_path(
+    item_object: object,
+    destination: Path,
+) -> str | None:
+    if not isinstance(item_object, dict):
+        return None
+
+    item = cast(dict[object, object], item_object)
+    relative_path = item.get("relativePath")
+    if isinstance(relative_path, str) and relative_path:
+        return relative_path
+
+    final_path = item.get("finalPath")
+    if isinstance(final_path, str) and final_path:
+        final_path_object = Path(final_path)
+        try:
+            return str(final_path_object.relative_to(destination))
+        except ValueError:
+            return None
+
+    return None
+
+
+def load_resume_success_relative_paths(
+    downloads_dir: Path,
+    *,
+    url: str,
+    destination: Path,
+) -> set[str]:
+    status_by_path: dict[str, bool] = {}
+
+    for manifest_path in sorted(_manifest_paths(downloads_dir), key=_manifest_sort_key):
+        try:
+            payload_object = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except OSError, json.JSONDecodeError:
+            continue
+
+        if not isinstance(payload_object, dict):
+            continue
+
+        payload = cast(dict[object, object], payload_object)
+        manifest_url = payload.get("url")
+        manifest_destination = payload.get("destination")
+        if manifest_url != url or manifest_destination != str(destination):
+            continue
+
+        downloaded_object = payload.get("downloaded")
+        if isinstance(downloaded_object, list):
+            downloaded_items = cast(list[object], downloaded_object)
+            for item in downloaded_items:
+                relative_path = _extract_relative_path(item, destination)
+                if relative_path is not None:
+                    status_by_path[relative_path] = True
+
+        skipped_object = payload.get("skipped")
+        if isinstance(skipped_object, list):
+            skipped_items = cast(list[object], skipped_object)
+            for item in skipped_items:
+                relative_path = _extract_relative_path(item, destination)
+                if relative_path is not None:
+                    status_by_path[relative_path] = True
+
+        failed_object = payload.get("failed")
+        if isinstance(failed_object, list):
+            failed_items = cast(list[object], failed_object)
+            for item in failed_items:
+                relative_path = _extract_relative_path(item, destination)
+                if relative_path is not None:
+                    status_by_path[relative_path] = False
+
+    return {path for path, succeeded in status_by_path.items() if succeeded}
 
 
 def _js_asset_path(name: str) -> Path:
@@ -350,11 +522,23 @@ def _load_folder_with_retry(
 def _load_folder_entries_with_retry(
     page: Page,
     *,
+    downloads_dir: Path,
     target_url: str,
     timeout_ms: int,
     allow_interactive_login: bool,
     expected_folder_name: str | None,
+    use_folder_cache: bool,
 ) -> RemoteEntries:
+    if use_folder_cache:
+        cached_entries = load_folder_entries_cache(downloads_dir, target_url)
+        if cached_entries is not None:
+            _log(
+                "Using cached folder entries: "
+                f"{target_url} ({len(cached_entries.files)} file(s), "
+                f"{len(cached_entries.folders)} folder(s))"
+            )
+            return cached_entries
+
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder entries retry exhausted")
     attempt = 1
@@ -373,6 +557,7 @@ def _load_folder_entries_with_retry(
                 f"Folder entries attempt {attempt}: found {len(entries.files)} file(s), "
                 f"{len(entries.folders)} folder(s)"
             )
+            write_folder_entries_cache(downloads_dir, target_url, entries)
 
             # Child folders that parse as empty right after navigation are
             # usually not fully rendered yet in IDrive's SPA flow.
@@ -654,10 +839,12 @@ def list_current_folder_files(
         page = engine.new_page()
         entries = _load_folder_entries_with_retry(
             page,
+            downloads_dir=downloads_dir,
             target_url=url,
             timeout_ms=timeout_ms,
             allow_interactive_login=not headless,
             expected_folder_name=None,
+            use_folder_cache=False,
         )
         return entries.files
 
@@ -672,6 +859,8 @@ def download_current_folder(
     timeout_ms: int,
     cooldown_ms: int,
     overwrite: str,
+    use_folder_cache: bool = True,
+    resume_from_logs: bool = True,
 ) -> DownloadFolderReport:
     overwrite_mode = cast(OverwriteMode, overwrite)
     destination = ensure_destination_dir(destination)
@@ -690,6 +879,19 @@ def download_current_folder(
         FolderTask(url=url, destination=destination, expected_folder_name=None)
     ]
     visited_destinations: set[Path] = set()
+    successful_from_logs: set[str] = set()
+
+    if resume_from_logs and overwrite_mode == "skip":
+        successful_from_logs = load_resume_success_relative_paths(
+            downloads_dir,
+            url=url,
+            destination=destination,
+        )
+        if successful_from_logs:
+            _log(
+                "Resume log index loaded: "
+                f"{len(successful_from_logs)} previously successful file(s)"
+            )
 
     with BrowserEngine(config) as engine:
         page = engine.new_page()
@@ -708,10 +910,12 @@ def download_current_folder(
 
             remote_entries = _load_folder_entries_with_retry(
                 page,
+                downloads_dir=downloads_dir,
                 target_url=folder_task.url,
                 timeout_ms=timeout_ms,
                 allow_interactive_login=not headless,
                 expected_folder_name=folder_task.expected_folder_name,
+                use_folder_cache=use_folder_cache,
             )
             _precheck_overwrite_conflicts(
                 remote_entries.files,
@@ -747,6 +951,18 @@ def download_current_folder(
                         server_modified_text=remote_file.server_modified_text,
                     )
                 )
+                relative_path = _relative_path_from_destination(destination, final_path)
+                if relative_path in successful_from_logs:
+                    _log(f"Skipping previously successful file: {relative_path}")
+                    skipped.append(
+                        SkippedFile(
+                            file_name=remote_file.file_name,
+                            reason="previous run success",
+                            final_path=final_path,
+                        )
+                    )
+                    continue
+
                 if final_path.exists() and overwrite_mode == "skip":
                     _log(f"Skipping existing file: {final_path}")
                     skipped.append(
@@ -862,10 +1078,12 @@ def retry_missing_files_from_manifest(
             _log(f"Retrying {len(grouped_items)} file(s) from folder: {folder_url}")
             remote_entries = _load_folder_entries_with_retry(
                 page,
+                downloads_dir=downloads_dir,
                 target_url=folder_url,
                 timeout_ms=timeout_ms,
                 allow_interactive_login=not headless,
                 expected_folder_name=None,
+                use_folder_cache=True,
             )
             available_files = {item.file_name for item in remote_entries.files}
 

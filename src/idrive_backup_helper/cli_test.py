@@ -52,6 +52,27 @@ def test_build_parser_accepts_download_folder_command() -> None:
     assert args.timeout_ms == 120_000
     assert args.cooldown_ms == 1_500
     assert args.overwrite == "skip"
+    assert args.no_folder_cache is False
+    assert args.no_resume_logs is False
+
+
+def test_build_parser_accepts_download_folder_resume_and_cache_overrides() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "download-folder",
+            "--url",
+            "https://example.com/folder",
+            "--to",
+            "/tmp/output",
+            "--no-folder-cache",
+            "--no-resume-logs",
+        ]
+    )
+
+    assert args.command == "download-folder"
+    assert args.no_folder_cache is True
+    assert args.no_resume_logs is True
 
 
 def test_build_parser_accepts_verify_manifest_command() -> None:

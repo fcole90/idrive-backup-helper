@@ -2,9 +2,14 @@ import json
 import pytest
 
 from idrive_backup_helper.browser.downloads import (
+    RemoteEntries,
+    RemoteFile,
     DownloadFolderReport,
     FailedFile,
     RemoteFolder,
+    load_folder_entries_cache,
+    load_resume_success_relative_paths,
+    write_folder_entries_cache,
     build_manifest_path,
     build_retry_manifest_path,
     ensure_destination_dir,
@@ -170,3 +175,91 @@ def test_verify_download_manifest_reports_missing_files(tmp_path: Path) -> None:
     assert verification.expected_files == 1
     assert verification.present_files == 0
     assert len(verification.missing_files) == 1
+
+
+def test_folder_entries_cache_roundtrip(tmp_path: Path) -> None:
+    downloads_dir = tmp_path / "downloads"
+    entries = RemoteEntries(
+        files=[
+            RemoteFile(
+                file_name="example.txt",
+                row_index=1,
+                server_size_text="1 KB",
+                server_modified_text="2026-06-15",
+            )
+        ],
+        folders=[
+            RemoteFolder(
+                folder_name="nested",
+                href="https://example.com/nested",
+            )
+        ],
+    )
+
+    write_folder_entries_cache(downloads_dir, "https://example.com/root", entries)
+    cached = load_folder_entries_cache(downloads_dir, "https://example.com/root")
+
+    assert cached == entries
+
+
+def test_resume_success_paths_keep_latest_state(tmp_path: Path) -> None:
+    downloads_dir = tmp_path / "downloads"
+    downloads_dir.mkdir(parents=True)
+    destination = tmp_path / "out"
+    destination.mkdir(parents=True)
+
+    first_manifest = {
+        "url": "https://example.com/root",
+        "destination": str(destination),
+        "finishedAt": "2026-06-15T10:00:00",
+        "downloaded": [
+            {
+                "fileName": "a.txt",
+                "relativePath": "a.txt",
+                "finalPath": str(destination / "a.txt"),
+            }
+        ],
+        "skipped": [],
+        "failed": [
+            {
+                "fileName": "b.txt",
+                "finalPath": str(destination / "b.txt"),
+            }
+        ],
+    }
+    second_manifest = {
+        "url": "https://example.com/root",
+        "destination": str(destination),
+        "finishedAt": "2026-06-15T11:00:00",
+        "downloaded": [
+            {
+                "fileName": "b.txt",
+                "relativePath": "b.txt",
+                "finalPath": str(destination / "b.txt"),
+            }
+        ],
+        "skipped": [],
+        "failed": [
+            {
+                "fileName": "a.txt",
+                "finalPath": str(destination / "a.txt"),
+            }
+        ],
+    }
+
+    (downloads_dir / "download-folder-run-2026-06-15T10-00-00.json").write_text(
+        json.dumps(first_manifest) + "\n",
+        encoding="utf-8",
+    )
+    (downloads_dir / "retry-manifest-run-2026-06-15T11-00-00.json").write_text(
+        json.dumps(second_manifest) + "\n",
+        encoding="utf-8",
+    )
+
+    successful_paths = load_resume_success_relative_paths(
+        downloads_dir,
+        url="https://example.com/root",
+        destination=destination,
+    )
+
+    assert successful_paths == {"b.txt"}

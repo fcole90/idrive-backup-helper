@@ -77,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="skip",
         help="How to handle already-existing destination files",
     )
+    download_parser.add_argument(
+        "--no-folder-cache",
+        action="store_true",
+        help="Disable cached folder listings and always re-scan folder contents",
+    )
+    download_parser.add_argument(
+        "--no-resume-logs",
+        action="store_true",
+        help="Disable resume indexing from prior manifests for this URL/destination",
+    )
 
     verify_parser = subparsers.add_parser(
         "verify-manifest",
@@ -126,6 +136,8 @@ def _run_download_folder(
     timeout_ms: int,
     cooldown_ms: int,
     overwrite: str,
+    no_folder_cache: bool,
+    no_resume_logs: bool,
 ) -> int:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
@@ -143,6 +155,8 @@ def _run_download_folder(
         timeout_ms=timeout_ms,
         cooldown_ms=cooldown_ms,
         overwrite=overwrite,
+        use_folder_cache=not no_folder_cache,
+        resume_from_logs=not no_resume_logs,
     )
 
     print(f"Destination: {destination}")
@@ -212,6 +226,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_ms=args.timeout_ms,
                 cooldown_ms=args.cooldown_ms,
                 overwrite=args.overwrite,
+                no_folder_cache=args.no_folder_cache,
+                no_resume_logs=args.no_resume_logs,
             )
         if args.command == "verify-manifest":
             return _run_verify_manifest(args.manifest)
