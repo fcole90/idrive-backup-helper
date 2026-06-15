@@ -6,7 +6,9 @@ from idrive_backup_helper.browser.downloads import (
     RemoteFile,
     DownloadFolderReport,
     FailedFile,
+    ProgressEventLogger,
     RemoteFolder,
+    build_progress_log_path,
     load_folder_entries_cache,
     load_resume_success_relative_paths,
     write_folder_entries_cache,
@@ -97,6 +99,16 @@ def test_build_retry_manifest_path_uses_expected_file_name() -> None:
     assert manifest_path.name == "retry-manifest-run-2026-06-14T14-30-00.json"
 
 
+def test_build_progress_log_path_uses_expected_file_name() -> None:
+    log_path = build_progress_log_path(
+        Path("/tmp/downloads"),
+        datetime(2026, 6, 14, 14, 30, 0),
+        prefix="download-folder-progress",
+    )
+
+    assert log_path.name == "download-folder-progress-2026-06-14T14-30-00.ndjson"
+
+
 def test_ensure_destination_dir_creates_missing_directory(tmp_path: Path) -> None:
     destination = tmp_path / "nested" / "output"
 
@@ -175,6 +187,27 @@ def test_verify_download_manifest_reports_missing_files(tmp_path: Path) -> None:
     assert verification.expected_files == 1
     assert verification.present_files == 0
     assert len(verification.missing_files) == 1
+
+
+def test_progress_event_logger_appends_jsonl_records(tmp_path: Path) -> None:
+    log_path = tmp_path / "events.ndjson"
+    logger = ProgressEventLogger(log_path)
+
+    logger.log("run_started", mode="download-folder")
+    logger.log("file_skipped", fileName="example.txt", reason="destination exists")
+
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+
+    first_event = json.loads(lines[0])
+    second_event = json.loads(lines[1])
+
+    assert first_event["event"] == "run_started"
+    assert first_event["sequence"] == 0
+    assert first_event["mode"] == "download-folder"
+    assert second_event["event"] == "file_skipped"
+    assert second_event["sequence"] == 1
+    assert second_event["fileName"] == "example.txt"
 
 
 def test_folder_entries_cache_roundtrip(tmp_path: Path) -> None:

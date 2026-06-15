@@ -99,6 +99,7 @@ class DownloadFolderReport:
     failed: list[FailedFile]
     discovered_files: list[ManifestFileRecord]
     manifest_path: Path
+    progress_log_path: Path | None = None
 
     @property
     def exit_code(self) -> int:
@@ -122,6 +123,49 @@ class FolderTask:
 
 def _log(message: str) -> None:
     print(f"[download-folder] {message}", flush=True)
+
+
+def _iso_now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def build_progress_log_path(
+    downloads_dir: Path,
+    started_at: datetime,
+    *,
+    prefix: str,
+) -> Path:
+    timestamp = started_at.strftime("%Y-%m-%dT%H-%M-%S")
+    return downloads_dir / f"{prefix}-{timestamp}.ndjson"
+
+
+class ProgressEventLogger:
+    def __init__(self, progress_log_path: Path) -> None:
+        self.progress_log_path = progress_log_path
+        self._sequence = 0
+        self._enabled = True
+        self.progress_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, event_type: str, **fields: object) -> None:
+        if not self._enabled:
+            return
+
+        payload: dict[str, object] = {
+            "timestamp": _iso_now(),
+            "sequence": self._sequence,
+            "event": event_type,
+            **fields,
+        }
+
+        try:
+            with self.progress_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload) + "\n")
+        except OSError as error:
+            _log(f"Progress log disabled after write error: {error}")
+            self._enabled = False
+            return
+
+        self._sequence += 1
 
 
 def _folder_cache_dir(downloads_dir: Path) -> Path:
@@ -667,6 +711,11 @@ def _write_manifest(report: DownloadFolderReport, repo_root: Path) -> None:
         "destination": str(report.destination),
         "startedAt": report.started_at.isoformat(timespec="seconds"),
         "finishedAt": report.finished_at.isoformat(timespec="seconds"),
+        "progressLogPath": (
+            str(report.progress_log_path)
+            if report.progress_log_path is not None
+            else None
+        ),
         "downloaded": [
             {
                 "fileName": item.file_name,
@@ -871,6 +920,22 @@ def download_current_folder(
         timeout_ms=timeout_ms,
     )
     started_at = datetime.now()
+    progress_log_path = build_progress_log_path(
+        downloads_dir,
+        started_at,
+        prefix="download-folder-progress",
+    )
+    progress_logger = ProgressEventLogger(progress_log_path)
+    progress_logger.log(
+        "run_started",
+        mode="download-folder",
+        url=url,
+        destination=str(destination),
+        overwrite=overwrite_mode,
+        useFolderCache=use_folder_cache,
+        resumeFromLogs=resume_from_logs,
+    )
+
     downloaded: list[DownloadedFile] = []
     skipped: list[SkippedFile] = []
     failed: list[FailedFile] = []
@@ -887,125 +952,196 @@ def download_current_folder(
             url=url,
             destination=destination,
         )
+        progress_logger.log(
+            "resume_index_loaded",
+            successfulCount=len(successful_from_logs),
+        )
         if successful_from_logs:
             _log(
                 "Resume log index loaded: "
                 f"{len(successful_from_logs)} previously successful file(s)"
             )
 
-    with BrowserEngine(config) as engine:
-        page = engine.new_page()
-        while folder_queue:
-            folder_task = folder_queue.pop(0)
-            if folder_task.destination in visited_destinations:
-                _log(f"Skipping already visited destination: {folder_task.destination}")
-                continue
+    try:
+        with BrowserEngine(config) as engine:
+            page = engine.new_page()
+            while folder_queue:
+                folder_task = folder_queue.pop(0)
+                if folder_task.destination in visited_destinations:
+                    _log(
+                        f"Skipping already visited destination: {folder_task.destination}"
+                    )
+                    progress_logger.log(
+                        "folder_skipped_visited",
+                        folderUrl=folder_task.url,
+                        destination=str(folder_task.destination),
+                    )
+                    continue
 
-            visited_destinations.add(folder_task.destination)
-            ensure_destination_dir(folder_task.destination)
-            _log(
-                f"Processing folder: {folder_task.url} -> {folder_task.destination} "
-                f"(queue remaining: {len(folder_queue)})"
-            )
-
-            remote_entries = _load_folder_entries_with_retry(
-                page,
-                downloads_dir=downloads_dir,
-                target_url=folder_task.url,
-                timeout_ms=timeout_ms,
-                allow_interactive_login=not headless,
-                expected_folder_name=folder_task.expected_folder_name,
-                use_folder_cache=use_folder_cache,
-            )
-            _precheck_overwrite_conflicts(
-                remote_entries.files,
-                folder_task.destination,
-                overwrite_mode,
-            )
-
-            for remote_folder in remote_entries.folders:
-                child_destination = folder_task.destination / remote_folder.folder_name
+                visited_destinations.add(folder_task.destination)
+                ensure_destination_dir(folder_task.destination)
                 _log(
-                    f"Queueing child folder: {remote_folder.folder_name} -> {child_destination}"
+                    f"Processing folder: {folder_task.url} -> {folder_task.destination} "
+                    f"(queue remaining: {len(folder_queue)})"
                 )
-                folder_queue.append(
-                    FolderTask(
-                        url=remote_folder.href,
-                        destination=child_destination,
-                        expected_folder_name=remote_folder.folder_name,
-                    )
+                progress_logger.log(
+                    "folder_started",
+                    folderUrl=folder_task.url,
+                    destination=str(folder_task.destination),
+                    queueRemaining=len(folder_queue),
                 )
 
-            for remote_file in remote_entries.files:
-                final_path = folder_task.destination / remote_file.file_name
-                discovered_files.append(
-                    ManifestFileRecord(
-                        folder_url=folder_task.url,
-                        relative_path=_relative_path_from_destination(
-                            destination,
-                            final_path,
-                        ),
-                        file_name=remote_file.file_name,
-                        final_path=final_path,
-                        server_size_text=remote_file.server_size_text,
-                        server_modified_text=remote_file.server_modified_text,
-                    )
+                remote_entries = _load_folder_entries_with_retry(
+                    page,
+                    downloads_dir=downloads_dir,
+                    target_url=folder_task.url,
+                    timeout_ms=timeout_ms,
+                    allow_interactive_login=not headless,
+                    expected_folder_name=folder_task.expected_folder_name,
+                    use_folder_cache=use_folder_cache,
                 )
-                relative_path = _relative_path_from_destination(destination, final_path)
-                if relative_path in successful_from_logs:
-                    _log(f"Skipping previously successful file: {relative_path}")
-                    skipped.append(
-                        SkippedFile(
+                progress_logger.log(
+                    "folder_entries_loaded",
+                    folderUrl=folder_task.url,
+                    fileCount=len(remote_entries.files),
+                    folderCount=len(remote_entries.folders),
+                )
+                _precheck_overwrite_conflicts(
+                    remote_entries.files,
+                    folder_task.destination,
+                    overwrite_mode,
+                )
+
+                for remote_folder in remote_entries.folders:
+                    child_destination = (
+                        folder_task.destination / remote_folder.folder_name
+                    )
+                    _log(
+                        "Queueing child folder: "
+                        f"{remote_folder.folder_name} -> {child_destination}"
+                    )
+                    progress_logger.log(
+                        "folder_queued",
+                        folderUrl=remote_folder.href,
+                        destination=str(child_destination),
+                    )
+                    folder_queue.append(
+                        FolderTask(
+                            url=remote_folder.href,
+                            destination=child_destination,
+                            expected_folder_name=remote_folder.folder_name,
+                        )
+                    )
+
+                for remote_file in remote_entries.files:
+                    final_path = folder_task.destination / remote_file.file_name
+                    relative_path = _relative_path_from_destination(
+                        destination, final_path
+                    )
+                    discovered_files.append(
+                        ManifestFileRecord(
+                            folder_url=folder_task.url,
+                            relative_path=relative_path,
                             file_name=remote_file.file_name,
+                            final_path=final_path,
+                            server_size_text=remote_file.server_size_text,
+                            server_modified_text=remote_file.server_modified_text,
+                        )
+                    )
+                    progress_logger.log(
+                        "file_discovered",
+                        folderUrl=folder_task.url,
+                        fileName=remote_file.file_name,
+                        relativePath=relative_path,
+                    )
+
+                    if relative_path in successful_from_logs:
+                        _log(f"Skipping previously successful file: {relative_path}")
+                        progress_logger.log(
+                            "file_skipped",
+                            fileName=remote_file.file_name,
+                            relativePath=relative_path,
                             reason="previous run success",
-                            final_path=final_path,
                         )
-                    )
-                    continue
+                        skipped.append(
+                            SkippedFile(
+                                file_name=remote_file.file_name,
+                                reason="previous run success",
+                                final_path=final_path,
+                            )
+                        )
+                        continue
 
-                if final_path.exists() and overwrite_mode == "skip":
-                    _log(f"Skipping existing file: {final_path}")
-                    skipped.append(
-                        SkippedFile(
-                            file_name=remote_file.file_name,
+                    if final_path.exists() and overwrite_mode == "skip":
+                        _log(f"Skipping existing file: {final_path}")
+                        progress_logger.log(
+                            "file_skipped",
+                            fileName=remote_file.file_name,
+                            relativePath=relative_path,
                             reason="destination exists",
-                            final_path=final_path,
                         )
-                    )
-                    continue
+                        skipped.append(
+                            SkippedFile(
+                                file_name=remote_file.file_name,
+                                reason="destination exists",
+                                final_path=final_path,
+                            )
+                        )
+                        continue
 
-                try:
-                    staged_path = _download_one_file(
-                        page,
-                        remote_file,
-                        downloads_dir,
-                        cooldown_ms,
+                    progress_logger.log(
+                        "file_download_started",
+                        fileName=remote_file.file_name,
+                        relativePath=relative_path,
                     )
-                    moved_path = move_download_to_destination(
-                        staged_path,
-                        folder_task.destination,
-                        remote_file.file_name,
-                        replace_existing=overwrite_mode == "replace",
-                    )
-                    _log(f"Moved download to destination: {moved_path}")
-                except (OSError, RuntimeError) as error:
-                    _log(f"Failed file download: {remote_file.file_name} ({error})")
-                    failed.append(
-                        FailedFile(
-                            file_name=remote_file.file_name,
+                    try:
+                        staged_path = _download_one_file(
+                            page,
+                            remote_file,
+                            downloads_dir,
+                            cooldown_ms,
+                        )
+                        moved_path = move_download_to_destination(
+                            staged_path,
+                            folder_task.destination,
+                            remote_file.file_name,
+                            replace_existing=overwrite_mode == "replace",
+                        )
+                        _log(f"Moved download to destination: {moved_path}")
+                    except (OSError, RuntimeError) as error:
+                        _log(f"Failed file download: {remote_file.file_name} ({error})")
+                        progress_logger.log(
+                            "file_failed",
+                            fileName=remote_file.file_name,
+                            relativePath=relative_path,
                             reason=str(error),
-                            final_path=final_path,
+                        )
+                        failed.append(
+                            FailedFile(
+                                file_name=remote_file.file_name,
+                                reason=str(error),
+                                final_path=final_path,
+                            )
+                        )
+                        continue
+
+                    progress_logger.log(
+                        "file_downloaded",
+                        fileName=remote_file.file_name,
+                        relativePath=relative_path,
+                        stagedPath=str(staged_path),
+                        finalPath=str(moved_path),
+                    )
+                    downloaded.append(
+                        DownloadedFile(
+                            file_name=remote_file.file_name,
+                            staged_path=staged_path,
+                            final_path=moved_path,
                         )
                     )
-                    continue
-
-                downloaded.append(
-                    DownloadedFile(
-                        file_name=remote_file.file_name,
-                        staged_path=staged_path,
-                        final_path=moved_path,
-                    )
-                )
+    except Exception as error:
+        progress_logger.log("run_failed", reason=str(error))
+        raise
 
     finished_at = datetime.now()
     repo_root = downloads_dir.parents[2]
@@ -1020,6 +1156,15 @@ def download_current_folder(
         failed=failed,
         discovered_files=discovered_files,
         manifest_path=manifest_path,
+        progress_log_path=progress_log_path,
+    )
+    progress_logger.log(
+        "run_finished",
+        downloadedCount=len(downloaded),
+        skippedCount=len(skipped),
+        failedCount=len(failed),
+        manifestPath=str(manifest_path),
+        exitCode=report.exit_code,
     )
     _write_manifest(report, repo_root)
     return report
@@ -1041,6 +1186,20 @@ def retry_missing_files_from_manifest(
     ]
     overwrite_mode = cast(OverwriteMode, overwrite)
     started_at = datetime.now()
+    progress_log_path = build_progress_log_path(
+        downloads_dir,
+        started_at,
+        prefix="retry-manifest-progress",
+    )
+    progress_logger = ProgressEventLogger(progress_log_path)
+    progress_logger.log(
+        "run_started",
+        mode="retry-manifest",
+        manifestPath=str(manifest_path),
+        targetCount=len(targets),
+        overwrite=overwrite_mode,
+    )
+
     downloaded: list[DownloadedFile] = []
     skipped: list[SkippedFile] = []
     failed: list[FailedFile] = []
@@ -1056,6 +1215,15 @@ def retry_missing_files_from_manifest(
             failed=[],
             discovered_files=[],
             manifest_path=build_retry_manifest_path(downloads_dir, started_at),
+            progress_log_path=progress_log_path,
+        )
+        progress_logger.log(
+            "run_finished",
+            downloadedCount=0,
+            skippedCount=0,
+            failedCount=0,
+            manifestPath=str(report.manifest_path),
+            exitCode=report.exit_code,
         )
         _write_manifest(report, downloads_dir.parents[2])
         return report
@@ -1072,77 +1240,124 @@ def retry_missing_files_from_manifest(
         timeout_ms=timeout_ms,
     )
 
-    with BrowserEngine(config) as engine:
-        page = engine.new_page()
-        for (folder_url, destination_dir), grouped_items in grouped_targets.items():
-            _log(f"Retrying {len(grouped_items)} file(s) from folder: {folder_url}")
-            remote_entries = _load_folder_entries_with_retry(
-                page,
-                downloads_dir=downloads_dir,
-                target_url=folder_url,
-                timeout_ms=timeout_ms,
-                allow_interactive_login=not headless,
-                expected_folder_name=None,
-                use_folder_cache=True,
-            )
-            available_files = {item.file_name for item in remote_entries.files}
-
-            for item in grouped_items:
-                if item.final_path.exists() and overwrite_mode == "skip":
-                    skipped.append(
-                        SkippedFile(
-                            file_name=item.file_name,
-                            reason="destination exists",
-                            final_path=item.final_path,
-                        )
-                    )
-                    continue
-
-                if item.file_name not in available_files:
-                    failed.append(
-                        FailedFile(
-                            file_name=item.file_name,
-                            reason="File no longer present in remote folder view",
-                            final_path=item.final_path,
-                        )
-                    )
-                    continue
-
-                try:
-                    staged_path = _download_one_file(
-                        page,
-                        RemoteFile(
-                            file_name=item.file_name,
-                            row_index=-1,
-                            server_size_text=item.server_size_text,
-                            server_modified_text=item.server_modified_text,
-                        ),
-                        downloads_dir,
-                        cooldown_ms,
-                    )
-                    moved_path = move_download_to_destination(
-                        staged_path,
-                        destination_dir,
-                        item.file_name,
-                        replace_existing=overwrite_mode == "replace",
-                    )
-                except (OSError, RuntimeError) as error:
-                    failed.append(
-                        FailedFile(
-                            file_name=item.file_name,
-                            reason=str(error),
-                            final_path=item.final_path,
-                        )
-                    )
-                    continue
-
-                downloaded.append(
-                    DownloadedFile(
-                        file_name=item.file_name,
-                        staged_path=staged_path,
-                        final_path=moved_path,
-                    )
+    try:
+        with BrowserEngine(config) as engine:
+            page = engine.new_page()
+            for (folder_url, destination_dir), grouped_items in grouped_targets.items():
+                _log(f"Retrying {len(grouped_items)} file(s) from folder: {folder_url}")
+                progress_logger.log(
+                    "folder_started",
+                    folderUrl=folder_url,
+                    destination=str(destination_dir),
+                    targetCount=len(grouped_items),
                 )
+                remote_entries = _load_folder_entries_with_retry(
+                    page,
+                    downloads_dir=downloads_dir,
+                    target_url=folder_url,
+                    timeout_ms=timeout_ms,
+                    allow_interactive_login=not headless,
+                    expected_folder_name=None,
+                    use_folder_cache=True,
+                )
+                available_files = {item.file_name for item in remote_entries.files}
+
+                for item in grouped_items:
+                    progress_logger.log(
+                        "file_discovered",
+                        folderUrl=folder_url,
+                        fileName=item.file_name,
+                        relativePath=item.relative_path,
+                    )
+                    if item.final_path.exists() and overwrite_mode == "skip":
+                        progress_logger.log(
+                            "file_skipped",
+                            fileName=item.file_name,
+                            relativePath=item.relative_path,
+                            reason="destination exists",
+                        )
+                        skipped.append(
+                            SkippedFile(
+                                file_name=item.file_name,
+                                reason="destination exists",
+                                final_path=item.final_path,
+                            )
+                        )
+                        continue
+
+                    if item.file_name not in available_files:
+                        reason = "File no longer present in remote folder view"
+                        progress_logger.log(
+                            "file_failed",
+                            fileName=item.file_name,
+                            relativePath=item.relative_path,
+                            reason=reason,
+                        )
+                        failed.append(
+                            FailedFile(
+                                file_name=item.file_name,
+                                reason=reason,
+                                final_path=item.final_path,
+                            )
+                        )
+                        continue
+
+                    progress_logger.log(
+                        "file_download_started",
+                        fileName=item.file_name,
+                        relativePath=item.relative_path,
+                    )
+                    try:
+                        staged_path = _download_one_file(
+                            page,
+                            RemoteFile(
+                                file_name=item.file_name,
+                                row_index=-1,
+                                server_size_text=item.server_size_text,
+                                server_modified_text=item.server_modified_text,
+                            ),
+                            downloads_dir,
+                            cooldown_ms,
+                        )
+                        moved_path = move_download_to_destination(
+                            staged_path,
+                            destination_dir,
+                            item.file_name,
+                            replace_existing=overwrite_mode == "replace",
+                        )
+                    except (OSError, RuntimeError) as error:
+                        progress_logger.log(
+                            "file_failed",
+                            fileName=item.file_name,
+                            relativePath=item.relative_path,
+                            reason=str(error),
+                        )
+                        failed.append(
+                            FailedFile(
+                                file_name=item.file_name,
+                                reason=str(error),
+                                final_path=item.final_path,
+                            )
+                        )
+                        continue
+
+                    progress_logger.log(
+                        "file_downloaded",
+                        fileName=item.file_name,
+                        relativePath=item.relative_path,
+                        stagedPath=str(staged_path),
+                        finalPath=str(moved_path),
+                    )
+                    downloaded.append(
+                        DownloadedFile(
+                            file_name=item.file_name,
+                            staged_path=staged_path,
+                            final_path=moved_path,
+                        )
+                    )
+    except Exception as error:
+        progress_logger.log("run_failed", reason=str(error))
+        raise
 
     report = DownloadFolderReport(
         url=manifest.url,
@@ -1154,6 +1369,15 @@ def retry_missing_files_from_manifest(
         failed=failed,
         discovered_files=targets,
         manifest_path=build_retry_manifest_path(downloads_dir, started_at),
+        progress_log_path=progress_log_path,
+    )
+    progress_logger.log(
+        "run_finished",
+        downloadedCount=len(downloaded),
+        skippedCount=len(skipped),
+        failedCount=len(failed),
+        manifestPath=str(report.manifest_path),
+        exitCode=report.exit_code,
     )
     _write_manifest(report, downloads_dir.parents[2])
     return report

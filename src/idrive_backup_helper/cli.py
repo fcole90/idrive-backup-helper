@@ -163,6 +163,8 @@ def _run_download_folder(
     print(f"Downloaded: {len(report.downloaded)}")
     print(f"Skipped: {len(report.skipped)}")
     print(f"Failed: {len(report.failed)}")
+    if report.progress_log_path is not None:
+        print(f"Progress log: {report.progress_log_path}")
     print(f"Manifest: {report.manifest_path}")
     return report.exit_code
 
@@ -204,6 +206,8 @@ def _run_retry_manifest(
     print(f"Retried downloads: {len(report.downloaded)}")
     print(f"Skipped: {len(report.skipped)}")
     print(f"Failed: {len(report.failed)}")
+    if report.progress_log_path is not None:
+        print(f"Progress log: {report.progress_log_path}")
     return report.exit_code
 
 
