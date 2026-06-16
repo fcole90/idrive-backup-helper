@@ -91,7 +91,7 @@ def list_current_folder_files(
     )
 
     with BrowserEngine(config) as engine:
-        page = engine.new_page()
+        page = engine.current_page_or_new_page()
         entries = load_folder_entries_with_retry(
             page,
             downloads_dir=downloads_dir,

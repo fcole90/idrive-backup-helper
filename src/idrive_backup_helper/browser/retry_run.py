@@ -104,7 +104,7 @@ def retry_missing_files_from_manifest(
 
     try:
         with BrowserEngine(config) as engine:
-            page = engine.new_page()
+            page = engine.current_page_or_new_page()
             for (folder_url, destination_dir), grouped_items in grouped_targets.items():
                 log_download_message(
                     f"Retrying {len(grouped_items)} file(s) from folder: {folder_url}"

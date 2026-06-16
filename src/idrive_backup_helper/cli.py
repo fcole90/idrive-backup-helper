@@ -20,6 +20,8 @@ from idrive_backup_helper.filesystem.paths import (
     find_repo_root,
 )
 
+DEFAULT_TIMEOUT_MS = 120 * 60 * 1_000
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="IDrive backup helper")
@@ -73,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser.add_argument(
         "--timeout-ms",
         type=int,
-        default=120_000,
+        default=DEFAULT_TIMEOUT_MS,
         help="Playwright timeout for page operations",
     )
     download_parser.add_argument(
@@ -119,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retry_parser.add_argument("--manifest", required=True, type=Path)
     retry_parser.add_argument("--headed", action="store_true")
-    retry_parser.add_argument("--timeout-ms", type=int, default=120_000)
+    retry_parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS)
     retry_parser.add_argument("--cooldown-ms", type=int, default=1_500)
     retry_parser.add_argument(
         "--overwrite",

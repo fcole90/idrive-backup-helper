@@ -121,7 +121,7 @@ def download_current_folder(
 
     try:
         with BrowserEngine(config) as engine:
-            page = engine.new_page()
+            page = engine.current_page_or_new_page()
             while folder_queue:
                 folder_task = folder_queue.pop(0)
                 if folder_task.destination in visited_destinations:

@@ -5,6 +5,10 @@ import time
 from typing import Literal
 from typing import Protocol
 from typing import cast
+from urllib.parse import parse_qsl
+from urllib.parse import unquote
+from urllib.parse import urlparse
+from urllib.parse import urlunparse
 
 from playwright.sync_api import (
     Error as PlaywrightError,
@@ -27,7 +31,7 @@ FOLDER_SETTLE_POLL_MS = 1_000
 FOLDER_SETTLE_STABLE_TICKS = 10
 FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
-FOLDER_LOAD_RETRY_TIMEOUT_MS = 120_000
+FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
 type SelectorState = Literal["attached", "detached", "hidden", "visible"]
 
 
@@ -90,6 +94,30 @@ def _evaluate_current_folder_entries(page: Page) -> RemoteEntries:
         },
     )
     return parse_remote_entries(ensure_raw_file_list(raw_files))
+
+
+def _normalized_folder_url(url: str) -> str:
+    parsed_url = urlparse(url)
+    path = unquote(parsed_url.path).rstrip("/")
+    query_pairs = sorted(parse_qsl(parsed_url.query, keep_blank_values=True))
+    query = "&".join(f"{key}={value}" for key, value in query_pairs)
+    return urlunparse(
+        (
+            parsed_url.scheme.lower(),
+            parsed_url.netloc.lower(),
+            path,
+            "",
+            query,
+            "",
+        )
+    )
+
+
+def is_current_folder_url(current_url: str, target_url: str) -> bool:
+    if not current_url or current_url == "about:blank":
+        return False
+
+    return _normalized_folder_url(current_url) == _normalized_folder_url(target_url)
 
 
 @dataclass(frozen=True)
@@ -254,7 +282,11 @@ def _load_folder_with_retry(
                     else ""
                 )
             )
-            page.goto(target_url, wait_until="domcontentloaded")
+            if is_current_folder_url(page.url, target_url):
+                _log(f"Current tab is already at target folder: {target_url}")
+            else:
+                _log(f"Navigating folder page from {page.url} to {target_url}")
+                page.goto(target_url, wait_until="domcontentloaded")
             ensure_authenticated_page(
                 page,
                 target_url=target_url,

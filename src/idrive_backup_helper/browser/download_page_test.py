@@ -8,6 +8,7 @@ from idrive_backup_helper.browser.download_models import RemoteEntries
 from idrive_backup_helper.browser.download_page import (
     FOLDER_SETTLE_STABLE_TICKS,
     SelectorState,
+    is_current_folder_url,
     load_folder_entries_with_retry,
     wait_for_folder_view_settle,
 )
@@ -108,6 +109,91 @@ def test_load_folder_entries_accepts_settled_empty_folder(
     assert load_calls == 1
 
 
+def test_load_folder_entries_reuses_tab_when_current_url_matches_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = FakeLoadPage(
+        url="https://www.idrive.com/idrive/home/device/F/my%20path/fold_2/"
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page.ensure_authenticated_page",
+        _fake_ensure_authenticated_page,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page._evaluate_current_folder_entries",
+        _fake_evaluate_current_folder_entries,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page.write_folder_entries_cache",
+        _fake_write_folder_entries_cache,
+    )
+
+    entries = load_folder_entries_with_retry(
+        cast(Page, page),
+        downloads_dir=tmp_path,
+        target_url="https://www.idrive.com/idrive/home/device/F/my path/fold_2",
+        timeout_ms=60_000,
+        allow_interactive_login=True,
+        expected_folder_name=None,
+        use_folder_cache=False,
+    )
+
+    assert entries.files == []
+    assert entries.folders == []
+    assert page.navigated_urls == []
+
+
+def test_load_folder_entries_navigates_when_current_url_differs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    page = FakeLoadPage(url="https://www.idrive.com/idrive/home/device/F/fold_1")
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page.ensure_authenticated_page",
+        _fake_ensure_authenticated_page,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page._evaluate_current_folder_entries",
+        _fake_evaluate_current_folder_entries,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.download_page.write_folder_entries_cache",
+        _fake_write_folder_entries_cache,
+    )
+
+    target_url = "https://www.idrive.com/idrive/home/device/F/fold_2"
+    load_folder_entries_with_retry(
+        cast(Page, page),
+        downloads_dir=tmp_path,
+        target_url=target_url,
+        timeout_ms=60_000,
+        allow_interactive_login=True,
+        expected_folder_name=None,
+        use_folder_cache=False,
+    )
+
+    assert page.navigated_urls == [target_url]
+
+
+def test_is_current_folder_url_normalizes_encoding_and_trailing_slash() -> None:
+    assert (
+        is_current_folder_url(
+            "https://www.idrive.com/idrive/home/device/F/my%20path/fold_2/",
+            "https://www.idrive.com/idrive/home/device/F/my path/fold_2",
+        )
+        is True
+    )
+
+
 def _fake_load_folder_entries_cache(
     downloads_dir: Path,
     target_url: str,
@@ -124,4 +210,31 @@ def _fake_write_folder_entries_cache(
     target_url: str,
     entries: RemoteEntries,
 ) -> None:
+    return None
+
+
+class FakeLoadPage:
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.navigated_urls: list[str] = []
+
+    def goto(self, url: str, *, wait_until: str) -> None:
+        assert wait_until == "domcontentloaded"
+        self.url = url
+        self.navigated_urls.append(url)
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        pass
+
+
+def _fake_ensure_authenticated_page(
+    page: Page,
+    *,
+    target_url: str,
+    allow_interactive_login: bool,
+) -> None:
+    return None
+
+
+def _fake_wait_for_folder_view_settle(page: object, timeout_ms: int) -> None:
     return None

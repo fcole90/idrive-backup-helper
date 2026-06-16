@@ -94,6 +94,19 @@ class BrowserEngine:
         _log("Opening new page in browser context")
         return self._browser_context.new_page()
 
+    def current_page_or_new_page(self) -> Page:
+        if self._browser_context is None:
+            raise RuntimeError("BrowserEngine must be entered before selecting a page.")
+
+        pages = self._browser_context.pages
+        if pages:
+            page = pages[-1]
+            _log(f"Reusing existing browser page: {page.url}")
+            return page
+
+        _log("No existing browser page found; opening new page")
+        return self._browser_context.new_page()
+
     def _connect_or_launch_browser(self, playwright: Playwright) -> Browser:
         if self._config.browser_debug_url is None:
             raise RuntimeError("Cannot attach without a browser debug endpoint.")

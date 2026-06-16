@@ -83,6 +83,6 @@ def open_authenticated_browser(
     )
 
     with BrowserEngine(config) as engine:
-        page = engine.new_page()
+        page = engine.current_page_or_new_page()
         _log(f"Navigating browser to: {start_url}")
         page.goto(start_url, wait_until="domcontentloaded")

@@ -5,17 +5,24 @@ import pytest
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 
 
+class FakePage:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
 class FakeBrowserContext:
     def __init__(self) -> None:
         self.closed = False
         self.timeout_ms: int | None = None
-        self.page = object()
+        self.page = FakePage("https://www.idrive.com/idrive/home/current")
         self.pages = [self.page]
+        self.new_page_calls = 0
 
     def set_default_timeout(self, timeout_ms: int) -> None:
         self.timeout_ms = timeout_ms
 
-    def new_page(self) -> object:
+    def new_page(self) -> FakePage:
+        self.new_page_calls += 1
         return self.page
 
     def close(self) -> None:
@@ -135,3 +142,30 @@ def test_browser_engine_logs_detached_browser_lifecycle(
     assert (
         "[browser-session] Command finished; leaving detached browser running" in output
     )
+
+
+def test_browser_engine_reuses_current_page_without_opening_new_tab(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = FakeBrowserContext()
+    browser = FakeBrowser(context)
+    chromium = FakeChromium(browser)
+    playwright_context = FakePlaywrightContext(FakePlaywright(chromium))
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.engine.sync_playwright",
+        lambda: playwright_context,
+    )
+
+    config = BrowserConfig(
+        profile_dir=tmp_path / "profile",
+        downloads_dir=tmp_path / "downloads",
+        headless=False,
+        timeout_ms=1234,
+        browser_debug_url="http://127.0.0.1:9222",
+    )
+
+    with BrowserEngine(config) as engine:
+        assert engine.current_page_or_new_page() is context.page
+
+    assert context.new_page_calls == 0

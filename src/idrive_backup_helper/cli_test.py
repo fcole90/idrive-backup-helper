@@ -1,4 +1,4 @@
-from idrive_backup_helper.cli import build_parser
+from idrive_backup_helper.cli import DEFAULT_TIMEOUT_MS, build_parser
 
 
 def test_build_parser_accepts_auth_command() -> None:
@@ -51,7 +51,7 @@ def test_build_parser_accepts_download_folder_command() -> None:
     assert args.url == "https://example.com/folder"
     assert str(args.to) == "/tmp/output"
     assert args.headed is False
-    assert args.timeout_ms == 120_000
+    assert args.timeout_ms == DEFAULT_TIMEOUT_MS
     assert args.cooldown_ms == 1_500
     assert args.overwrite == "skip"
     assert args.no_folder_cache is False
@@ -93,7 +93,7 @@ def test_build_parser_accepts_retry_manifest_command() -> None:
     assert args.command == "retry-manifest"
     assert str(args.manifest) == "/tmp/run.json"
     assert args.headed is False
-    assert args.timeout_ms == 120_000
+    assert args.timeout_ms == DEFAULT_TIMEOUT_MS
     assert args.cooldown_ms == 1_500
     assert args.overwrite == "replace"
     assert args.browser_debug_url is None
