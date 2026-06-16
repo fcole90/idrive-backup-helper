@@ -1,5 +1,9 @@
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 import time
+from typing import Literal
+from typing import Protocol
 from typing import cast
 
 from playwright.sync_api import (
@@ -21,12 +25,31 @@ from idrive_backup_helper.browser.session import ensure_authenticated_page
 
 FOLDER_SETTLE_POLL_MS = 1_000
 FOLDER_SETTLE_STABLE_TICKS = 10
+FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120_000
+type SelectorState = Literal["attached", "detached", "hidden", "visible"]
 
 
 def _log(message: str) -> None:
     print(f"[download-folder] {message}", flush=True)
+
+
+class FolderViewPage(Protocol):
+    def wait_for_selector(
+        self,
+        selector: str,
+        *,
+        state: SelectorState | None = None,
+        timeout: float | None = None,
+    ) -> object:
+        pass
+
+    def evaluate(self, expression: str) -> object:
+        pass
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        pass
 
 
 def _js_asset_path(name: str) -> Path:
@@ -69,29 +92,106 @@ def _evaluate_current_folder_entries(page: Page) -> RemoteEntries:
     return parse_remote_entries(ensure_raw_file_list(raw_files))
 
 
-def _wait_for_folder_view_settle(page: Page, timeout_ms: int) -> None:
+@dataclass(frozen=True)
+class FolderViewState:
+    loader_visible: bool
+    content_row_count: int
+    total_row_count: int
+
+
+def _int_value(value: object | None) -> int:
+    return value if isinstance(value, int) else 0
+
+
+def _read_folder_view_state(page: FolderViewPage) -> FolderViewState:
+    raw_state: object = page.evaluate("""
+() => {
+  const container = document.querySelector('#file_list_container');
+  if (!container) {
+    return { loaderVisible: false, contentRowCount: 0, totalRowCount: 0 };
+  }
+
+  const loader = container.querySelector('#loader, li.loader');
+  const loaderStyle = loader ? window.getComputedStyle(loader) : null;
+  const loaderVisible = Boolean(
+    loader &&
+    !loader.hidden &&
+    loaderStyle &&
+    loaderStyle.display !== 'none' &&
+    loaderStyle.visibility !== 'hidden' &&
+    loader.getClientRects().length > 0
+  );
+
+  const rows = [...container.querySelectorAll(':scope > li')];
+  const contentRows = rows.filter(
+    (row) => row.id !== 'loader' && !row.classList.contains('loader')
+  );
+
+  return {
+    loaderVisible,
+    contentRowCount: contentRows.length,
+    totalRowCount: rows.length,
+  };
+}
+""")
+    if not isinstance(raw_state, Mapping):
+        return FolderViewState(
+            loader_visible=False,
+            content_row_count=0,
+            total_row_count=0,
+        )
+
+    return FolderViewState(
+        loader_visible=raw_state.get("loaderVisible") is True,
+        content_row_count=_int_value(raw_state.get("contentRowCount")),
+        total_row_count=_int_value(raw_state.get("totalRowCount")),
+    )
+
+
+def wait_for_folder_view_settle(page: FolderViewPage, timeout_ms: int) -> None:
     page.wait_for_selector("#file_list_container", state="attached", timeout=timeout_ms)
 
     deadline = time.monotonic() + (timeout_ms / 1000)
     stable_ticks = 0
-    last_row_count = -1
+    last_content_row_count = -1
+    next_loader_log_at = 0.0
 
     while time.monotonic() < deadline:
-        row_count_obj: object = page.evaluate(
-            "() => document.querySelectorAll('#file_list_container > li').length"
-        )
-        row_count = int(row_count_obj) if isinstance(row_count_obj, int) else 0
+        view_state = _read_folder_view_state(page)
+        now = time.monotonic()
 
-        if row_count == last_row_count:
+        if view_state.loader_visible:
+            stable_ticks = 0
+            last_content_row_count = view_state.content_row_count
+            if now >= next_loader_log_at:
+                seconds_remaining = max(0, int(deadline - now))
+                _log(
+                    "Folder loader still visible; waiting "
+                    f"({view_state.content_row_count} content row(s), "
+                    f"{view_state.total_row_count} total row(s), "
+                    f"{seconds_remaining}s remaining)"
+                )
+                next_loader_log_at = now + FOLDER_LOADER_LOG_INTERVAL_SECONDS
+            page.wait_for_timeout(FOLDER_SETTLE_POLL_MS)
+            continue
+
+        if view_state.content_row_count == last_content_row_count:
             stable_ticks += 1
         else:
             stable_ticks = 0
-            last_row_count = row_count
+            last_content_row_count = view_state.content_row_count
 
         if stable_ticks >= FOLDER_SETTLE_STABLE_TICKS:
+            _log(
+                "Folder view settled "
+                f"({view_state.content_row_count} content row(s), "
+                f"{view_state.total_row_count} total row(s))"
+            )
             return
 
         page.wait_for_timeout(FOLDER_SETTLE_POLL_MS)
+
+    raise RuntimeError("Timed out waiting for folder loader to finish")
 
 
 def _read_breadcrumb_titles(page: Page) -> list[str]:
@@ -160,7 +260,7 @@ def _load_folder_with_retry(
                 target_url=target_url,
                 allow_interactive_login=allow_interactive_login,
             )
-            _wait_for_folder_view_settle(page, timeout_ms)
+            wait_for_folder_view_settle(page, timeout_ms)
             _ensure_expected_folder_loaded(page, expected_folder_name)
             _log(f"Folder load succeeded on attempt {attempt}: {target_url}")
             return
@@ -228,9 +328,7 @@ def load_folder_entries_with_retry(
                 f"{len(entries.folders)} folder(s)"
             )
             if not entries.files and not entries.folders:
-                raise RuntimeError(
-                    "Folder entries are empty; likely still loading. Retrying."
-                )
+                _log("Folder entries are empty after loader settled")
 
             write_folder_entries_cache(downloads_dir, target_url, entries)
 
