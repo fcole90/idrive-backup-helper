@@ -5,7 +5,9 @@ import pytest
 from idrive_backup_helper.browser.engine import (
     BrowserConfig,
     BrowserEngine,
+    DETACHED_CHROMIUM_STARTUP_FLAGS,
     ensure_browser_executable,
+    remove_stale_browser_profile_lock_files,
 )
 
 
@@ -192,3 +194,53 @@ def test_ensure_browser_executable_reuses_existing_browser(tmp_path: Path) -> No
     resolved_path = ensure_browser_executable(executable_path)
 
     assert resolved_path == executable_path
+
+
+def test_detached_chromium_startup_flags_include_linux_sandbox_workaround() -> None:
+    assert "--no-sandbox" in DETACHED_CHROMIUM_STARTUP_FLAGS
+
+
+def test_remove_stale_browser_profile_lock_files_removes_dead_local_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    monkeypatch.setattr("socket.gethostname", lambda: "current-host")
+    monkeypatch.setattr("os.kill", _raise_process_lookup_error)
+    for file_name in ("SingletonCookie", "SingletonLock", "SingletonSocket"):
+        (profile_dir / file_name).write_text(f"current-host-999999", encoding="utf-8")
+
+    removed_paths = remove_stale_browser_profile_lock_files(profile_dir)
+
+    assert [path.name for path in removed_paths] == [
+        "SingletonCookie",
+        "SingletonLock",
+        "SingletonSocket",
+    ]
+    for removed_path in removed_paths:
+        assert not removed_path.exists()
+
+
+def test_remove_stale_browser_profile_lock_files_keeps_running_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    monkeypatch.setattr("socket.gethostname", lambda: "current-host")
+    monkeypatch.setattr("os.kill", _ignore_process_signal)
+    (profile_dir / "SingletonLock").write_text("current-host-1234", encoding="utf-8")
+
+    removed_paths = remove_stale_browser_profile_lock_files(profile_dir)
+
+    assert removed_paths == []
+    assert (profile_dir / "SingletonLock").exists()
+
+
+def _raise_process_lookup_error(pid: int, signal: int) -> None:
+    raise ProcessLookupError(pid)
+
+
+def _ignore_process_signal(pid: int, signal: int) -> None:
+    return None
