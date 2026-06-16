@@ -12,7 +12,7 @@ dependencies = []
 dev = [
   "agentic-tools @ git+https://github.com/swiftpostlab/agentic-tools.git",
   "poethepoet>=0.46.0",
-  "pytest>=9.0.3",
+  "pytest>=9.1.0",
   "black>=26.5.1",
   "pyright>=1.1.410",
   "json5>=0.9",
