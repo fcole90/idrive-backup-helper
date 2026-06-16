@@ -2,12 +2,14 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from idrive_backup_helper.browser.download_models import RemoteEntries
+from idrive_backup_helper.browser.download_models import RemoteEntries, RemoteFile
 from idrive_backup_helper.browser.download_page import (
+    DOWNLOAD_START_TIMEOUT_MS,
     FOLDER_SETTLE_STABLE_TICKS,
     SelectorState,
+    download_one_file,
     is_current_folder_url,
     load_folder_entries_with_retry,
     wait_for_folder_view_settle,
@@ -194,6 +196,42 @@ def test_is_current_folder_url_normalizes_encoding_and_trailing_slash() -> None:
     )
 
 
+def test_download_one_file_uses_bounded_download_start_timeout(
+    tmp_path: Path,
+) -> None:
+    page = FakeDownloadTimeoutPage()
+
+    with pytest.raises(RuntimeError, match="stale or blocked download"):
+        download_one_file(
+            cast(Page, page),
+            remote_file=_remote_file("example.mp3"),
+            staging_dir=tmp_path,
+            cooldown_ms=1500,
+        )
+
+    assert page.expect_download_timeout == DOWNLOAD_START_TIMEOUT_MS
+
+
+def test_download_one_file_fails_fast_when_trigger_reports_missing_row(
+    tmp_path: Path,
+) -> None:
+    page = FakeDownloadTriggerFailurePage()
+
+    with pytest.raises(RuntimeError, match="File row not found"):
+        download_one_file(
+            cast(Page, page),
+            remote_file=_remote_file("example.mp3"),
+            staging_dir=tmp_path,
+            cooldown_ms=1500,
+        )
+
+    assert page.evaluate_payload == {
+        "fileName": "example.mp3",
+        "rowIndex": 1,
+        "cooldownMs": 1500,
+    }
+
+
 def _fake_load_folder_entries_cache(
     downloads_dir: Path,
     target_url: str,
@@ -238,3 +276,64 @@ def _fake_ensure_authenticated_page(
 
 def _fake_wait_for_folder_view_settle(page: object, timeout_ms: int) -> None:
     return None
+
+
+class FakeDownloadTimeoutPage:
+    def __init__(self) -> None:
+        self.expect_download_timeout: float | None = None
+
+    def expect_download(self, *, timeout: float) -> "FakeDownloadTimeoutWaiter":
+        self.expect_download_timeout = timeout
+        return FakeDownloadTimeoutWaiter()
+
+
+class FakeDownloadTimeoutWaiter:
+    def __enter__(self) -> object:
+        raise PlaywrightTimeoutError("download did not start")
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        return None
+
+
+class FakeDownloadTriggerFailurePage:
+    def __init__(self) -> None:
+        self.evaluate_payload: object | None = None
+
+    def expect_download(self, *, timeout: float) -> "FakeDownloadTriggerFailureWaiter":
+        assert timeout == DOWNLOAD_START_TIMEOUT_MS
+        return FakeDownloadTriggerFailureWaiter()
+
+    def evaluate(self, expression: str, payload: object) -> dict[str, object]:
+        self.evaluate_payload = payload
+        return {"ok": False, "reason": "File row not found after scrolling"}
+
+
+class FakeDownloadTriggerFailureWaiter:
+    def __enter__(self) -> "FakeDownloadTriggerFailureWaiter":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        return None
+
+    @property
+    def value(self) -> object:
+        raise AssertionError("download value should not be read after trigger failure")
+
+
+def _remote_file(file_name: str) -> RemoteFile:
+    return RemoteFile(
+        file_name=file_name,
+        row_index=1,
+        server_size_text=None,
+        server_modified_text=None,
+    )

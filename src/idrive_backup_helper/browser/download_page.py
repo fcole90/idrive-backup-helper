@@ -32,6 +32,7 @@ FOLDER_SETTLE_STABLE_TICKS = 10
 FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
+DOWNLOAD_START_TIMEOUT_MS = 60_000
 type SelectorState = Literal["attached", "detached", "hidden", "visible"]
 
 
@@ -384,6 +385,23 @@ def load_folder_entries_with_retry(
     )
 
 
+def ensure_folder_loaded_for_download(
+    page: Page,
+    *,
+    target_url: str,
+    timeout_ms: int,
+    allow_interactive_login: bool,
+    expected_folder_name: str | None,
+) -> None:
+    _load_folder_with_retry(
+        page,
+        target_url=target_url,
+        timeout_ms=timeout_ms,
+        allow_interactive_login=allow_interactive_login,
+        expected_folder_name=expected_folder_name,
+    )
+
+
 def download_one_file(
     page: Page,
     remote_file: RemoteFile,
@@ -394,20 +412,23 @@ def download_one_file(
     _log(f"Starting download: {remote_file.file_name}")
 
     try:
-        with page.expect_download() as download_info:
+        with page.expect_download(timeout=DOWNLOAD_START_TIMEOUT_MS) as download_info:
             trigger_result: object = page.evaluate(
                 script,
                 {
                     "fileName": remote_file.file_name,
+                    "rowIndex": remote_file.row_index,
                     "cooldownMs": cooldown_ms,
                 },
             )
+            _ensure_trigger_result(trigger_result, remote_file.file_name)
 
-        _ensure_trigger_result(trigger_result, remote_file.file_name)
         download = download_info.value
     except PlaywrightTimeoutError as error:
         raise RuntimeError(
-            f"Timed out waiting for download: {remote_file.file_name}"
+            "Timed out waiting for browser download to start: "
+            f"{remote_file.file_name}. IDrive may still have a stale or blocked "
+            "download in progress from a previous interrupted run."
         ) from error
     except PlaywrightError as error:
         raise RuntimeError(

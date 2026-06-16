@@ -22,6 +22,7 @@ from idrive_backup_helper.browser.download_models import (
     SkippedFile,
 )
 from idrive_backup_helper.browser.download_page import (
+    ensure_folder_loaded_for_download,
     load_folder_entries_with_retry,
 )
 from idrive_backup_helper.browser.download_progress import (
@@ -168,6 +169,7 @@ def download_current_folder(
                     folder_task.destination,
                     overwrite_mode,
                 )
+                folder_page_loaded_for_download = False
 
                 for remote_folder in remote_entries.folders:
                     child_destination = (
@@ -247,6 +249,16 @@ def download_current_folder(
                             )
                         )
                         continue
+
+                    if not folder_page_loaded_for_download:
+                        ensure_folder_loaded_for_download(
+                            page,
+                            target_url=folder_task.url,
+                            timeout_ms=timeout_ms,
+                            allow_interactive_login=not headless,
+                            expected_folder_name=folder_task.expected_folder_name,
+                        )
+                        folder_page_loaded_for_download = True
 
                     progress_logger.log(
                         "file_download_started",

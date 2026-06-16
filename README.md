@@ -9,7 +9,6 @@ Before continuing, make sure you have:
 - IDrive for Linux installed. If you still need it, download it from [IDrive Linux scripts](https://www.idrive.com/online-backup-linux-scripts).
 - Signed in to IDrive for Linux at least once on the same machine.
 
-
 ## Open a terminal and extract the ZIP
 
 - On Linux, open your applications menu and search for `Terminal`.

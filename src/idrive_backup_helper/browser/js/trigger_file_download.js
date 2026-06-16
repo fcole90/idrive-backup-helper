@@ -1,5 +1,6 @@
-async ({ fileName, cooldownMs }) => {
+async ({ fileName, rowIndex, cooldownMs }) => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const scrollingEl = document.scrollingElement || document.body;
   const forceClick = (el) => {
     if (!el) {
       return;
@@ -15,19 +16,40 @@ async ({ fileName, cooldownMs }) => {
     });
   };
 
-  const rows = [...document.querySelectorAll("#file_list_container > li")];
-  const targetRow = rows.find((row) => {
-    if (row.querySelector("a.fldr")) {
-      return false;
-    }
+  const findTargetRow = () => {
+    const rows = [...document.querySelectorAll("#file_list_container > li")];
+    return rows.find((row) => {
+      if (row.querySelector("a.fldr")) {
+        return false;
+      }
 
-    const nameEl = row.querySelector(".file_name a") || row.querySelector(".file_name span");
-    const candidateName = nameEl ? (nameEl.getAttribute("title") || nameEl.textContent.trim()) : "";
-    return candidateName === fileName;
-  });
+      const nameEl = row.querySelector(".file_name a") || row.querySelector(".file_name span");
+      const candidateName = nameEl ? (nameEl.getAttribute("title") || nameEl.textContent.trim()) : "";
+      return candidateName === fileName;
+    });
+  };
+
+  let targetRow = findTargetRow();
+  if (!targetRow && Number.isInteger(rowIndex)) {
+    window.scrollTo(0, Math.max(0, rowIndex * 48 - Math.floor(window.innerHeight / 2)));
+    await sleep(600);
+    targetRow = findTargetRow();
+  }
+
+  let scrollAttempts = 0;
+  while (!targetRow && scrollAttempts < 40) {
+    window.scrollBy(0, 900);
+    await sleep(250);
+    targetRow = findTargetRow();
+    scrollAttempts += 1;
+
+    if (Math.ceil(scrollingEl.scrollTop + window.innerHeight) >= scrollingEl.scrollHeight - 10) {
+      break;
+    }
+  }
 
   if (!targetRow) {
-    return { ok: false, reason: `File row not found: ${fileName}` };
+    return { ok: false, reason: `File row not found after scrolling: ${fileName}` };
   }
 
   targetRow.scrollIntoView({ block: "center" });
