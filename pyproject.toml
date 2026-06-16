@@ -61,6 +61,7 @@ lint-fix = "python -m black ./src"
 typecheck = "python -m pyright ./src"
 test = "python -m pytest"
 restore = "python scripts/backup_util.py"
+browser-setup = "python -m playwright install chromium"
 # --- AI Secure Parameterized Tasks ---
 lint-filter = { help = "Run linter and filter output", shell = "python -m black --check ./src | grep -i -E ${filter_term}", args = [
   { name = "filter_term", positional = true, required = true },

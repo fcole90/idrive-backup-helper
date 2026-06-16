@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
+from idrive_backup_helper.browser.engine import (
+    BrowserConfig,
+    BrowserEngine,
+    ensure_browser_executable,
+)
 
 
 class FakePage:
@@ -169,3 +173,22 @@ def test_browser_engine_reuses_current_page_without_opening_new_tab(
         assert engine.current_page_or_new_page() is context.page
 
     assert context.new_page_calls == 0
+
+
+def test_ensure_browser_executable_reports_setup_command_for_missing_browser(
+    tmp_path: Path,
+) -> None:
+    executable_path = tmp_path / "chromium" / "chrome"
+
+    with pytest.raises(RuntimeError, match="uv run poe browser-setup"):
+        ensure_browser_executable(executable_path)
+
+
+def test_ensure_browser_executable_reuses_existing_browser(tmp_path: Path) -> None:
+    executable_path = tmp_path / "chromium" / "chrome"
+    executable_path.parent.mkdir(parents=True)
+    executable_path.write_text("", encoding="utf-8")
+
+    resolved_path = ensure_browser_executable(executable_path)
+
+    assert resolved_path == executable_path

@@ -1,7 +1,7 @@
-from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import time
+from dataclasses import dataclass
 from types import TracebackType
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -29,6 +29,24 @@ def _first_error_line(error: Error) -> str:
     return str(error).splitlines()[0]
 
 
+def ensure_browser_executable(executable_path: Path) -> Path:
+    if executable_path.exists():
+        return executable_path
+
+    raise RuntimeError(
+        "Missing Playwright-managed Chromium executable: "
+        f"{executable_path}. Run: uv run poe browser-setup"
+    )
+
+
+def ensure_playwright_chromium_executable(playwright: Playwright) -> Path:
+    executable_path = ensure_browser_executable(
+        Path(playwright.chromium.executable_path)
+    )
+    _log(f"Using Playwright-managed Chromium package executable: {executable_path}")
+    return executable_path
+
+
 @dataclass(frozen=True)
 class BrowserConfig:
     profile_dir: Path
@@ -52,6 +70,9 @@ class BrowserEngine:
 
         self._playwright = self._playwright_context.__enter__()
         if self._config.browser_debug_url is None:
+            chromium_executable = ensure_playwright_chromium_executable(
+                self._playwright
+            )
             _log(
                 "Launching owned persistent browser context "
                 f"(headless={self._config.headless}, profile={self._config.profile_dir}, "
@@ -59,6 +80,7 @@ class BrowserEngine:
             )
             self._browser_context = self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self._config.profile_dir),
+                executable_path=str(chromium_executable),
                 headless=self._config.headless,
                 accept_downloads=True,
                 downloads_path=str(self._config.downloads_dir),
@@ -145,8 +167,9 @@ class BrowserEngine:
             raise RuntimeError("Cannot launch detached browser without debug endpoint.")
 
         endpoint = _parse_local_debug_endpoint(self._config.browser_debug_url)
+        chromium_executable = ensure_playwright_chromium_executable(playwright)
         args = [
-            playwright.chromium.executable_path,
+            str(chromium_executable),
             f"--remote-debugging-address={endpoint.host}",
             f"--remote-debugging-port={endpoint.port}",
             f"--user-data-dir={self._config.profile_dir}",

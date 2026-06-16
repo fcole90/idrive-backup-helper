@@ -191,7 +191,7 @@ Open or attach to the persistent browser session with:
 uv run main browse
 ```
 
-The command uses `http://127.0.0.1:9222` by default and stores the Chromium profile under `.agents/playground/browser-state/idrive-chromium`. The command returns after opening the page; the browser process stays open.
+The command uses `http://127.0.0.1:9222` by default and stores the Chromium profile under `.agents/playground/browser-state/idrive-chromium`. When it needs to launch a browser, it uses Playwright's managed `chromium` browser package. Install that browser with `uv run poe browser-setup` if it is missing. The command returns after opening the page; the browser process stays open.
 
 Then run headed downloads against the same browser session:
 
