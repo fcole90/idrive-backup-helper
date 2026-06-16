@@ -7,6 +7,7 @@ def test_build_parser_accepts_auth_command() -> None:
 
     assert args.command == "auth"
     assert args.url == "https://www.idrive.com/idrive/login/loginForm"
+    assert args.browser_debug_url == "http://127.0.0.1:9222"
 
 
 def test_build_parser_accepts_auth_url_override() -> None:
@@ -23,6 +24,7 @@ def test_build_parser_accepts_browse_command() -> None:
 
     assert args.command == "browse"
     assert args.url == "https://www.idrive.com/idrive/home"
+    assert args.browser_debug_url == "http://127.0.0.1:9222"
 
 
 def test_build_parser_accepts_browse_url_override() -> None:
@@ -54,6 +56,7 @@ def test_build_parser_accepts_download_folder_command() -> None:
     assert args.overwrite == "skip"
     assert args.no_folder_cache is False
     assert args.no_resume_logs is False
+    assert args.browser_debug_url is None
 
 
 def test_build_parser_accepts_download_folder_resume_and_cache_overrides() -> None:
@@ -93,3 +96,4 @@ def test_build_parser_accepts_retry_manifest_command() -> None:
     assert args.timeout_ms == 120_000
     assert args.cooldown_ms == 1_500
     assert args.overwrite == "replace"
+    assert args.browser_debug_url is None

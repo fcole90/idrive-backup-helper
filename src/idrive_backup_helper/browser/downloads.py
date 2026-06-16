@@ -80,12 +80,14 @@ def list_current_folder_files(
     url: str,
     headless: bool,
     timeout_ms: int,
+    browser_debug_url: str | None = None,
 ) -> list[RemoteFile]:
     config = BrowserConfig(
         profile_dir=profile_dir,
         downloads_dir=downloads_dir,
         headless=headless,
         timeout_ms=timeout_ms,
+        browser_debug_url=browser_debug_url,
     )
 
     with BrowserEngine(config) as engine:

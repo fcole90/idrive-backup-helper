@@ -39,6 +39,7 @@ def retry_missing_files_from_manifest(
     timeout_ms: int,
     cooldown_ms: int,
     overwrite: str,
+    browser_debug_url: str | None = None,
 ) -> DownloadFolderReport:
     manifest = load_download_manifest(manifest_path)
     targets = [
@@ -98,6 +99,7 @@ def retry_missing_files_from_manifest(
         downloads_dir=downloads_dir,
         headless=headless,
         timeout_ms=timeout_ms,
+        browser_debug_url=browser_debug_url,
     )
 
     try:

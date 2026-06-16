@@ -8,6 +8,7 @@ from idrive_backup_helper.browser.downloads import (
     retry_missing_files_from_manifest,
     verify_download_manifest,
 )
+from idrive_backup_helper.browser.engine import DEFAULT_BROWSER_DEBUG_URL
 from idrive_backup_helper.browser.session import (
     DEFAULT_BROWSE_URL,
     login_and_save_state,
@@ -32,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="https://www.idrive.com/idrive/login/loginForm",
         help="IDrive URL to open for login",
     )
+    auth_parser.add_argument(
+        "--browser-debug-url",
+        default=DEFAULT_BROWSER_DEBUG_URL,
+        help="Chromium remote debugging URL for the persistent browser session",
+    )
 
     browse_parser = subparsers.add_parser(
         "browse",
@@ -41,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--url",
         default=DEFAULT_BROWSE_URL,
         help="IDrive URL to open in the authenticated browser",
+    )
+    browse_parser.add_argument(
+        "--browser-debug-url",
+        default=DEFAULT_BROWSER_DEBUG_URL,
+        help="Chromium remote debugging URL for the persistent browser session",
     )
 
     download_parser = subparsers.add_parser(
@@ -87,6 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable resume indexing from prior manifests for this URL/destination",
     )
+    download_parser.add_argument(
+        "--browser-debug-url",
+        default=None,
+        help=(
+            "Attach to a persistent Chromium browser over CDP. "
+            "Defaults to the local session when --headed is set."
+        ),
+    )
 
     verify_parser = subparsers.add_parser(
         "verify-manifest",
@@ -107,25 +126,47 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["skip", "replace", "fail"],
         default="replace",
     )
+    retry_parser.add_argument(
+        "--browser-debug-url",
+        default=None,
+        help=(
+            "Attach to a persistent Chromium browser over CDP. "
+            "Defaults to the local session when --headed is set."
+        ),
+    )
 
     return parser
 
 
-def _run_auth(url: str) -> None:
+def _run_auth(url: str, browser_debug_url: str) -> None:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
-    login_and_save_state(profile_dir=profile_dir, start_url=url)
+    staged_downloads_dir = downloads_dir(repo_root)
+    login_and_save_state(
+        profile_dir=profile_dir,
+        downloads_dir=staged_downloads_dir,
+        start_url=url,
+        browser_debug_url=browser_debug_url,
+    )
 
-    print(f"Saved browser state under: {profile_dir}")
+    print(f"Opened persistent browser session at: {browser_debug_url}")
+    print(f"Browser state path: {profile_dir}")
     print(
         "Next step: uv run main browse or uv run main download-folder --url <FOLDER_URL> --to <DEST_PATH>"
     )
 
 
-def _run_browse(url: str) -> None:
+def _run_browse(url: str, browser_debug_url: str) -> None:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
-    open_authenticated_browser(profile_dir=profile_dir, start_url=url)
+    staged_downloads_dir = downloads_dir(repo_root)
+    open_authenticated_browser(
+        profile_dir=profile_dir,
+        downloads_dir=staged_downloads_dir,
+        start_url=url,
+        browser_debug_url=browser_debug_url,
+    )
+    print(f"Opened persistent browser session at: {browser_debug_url}")
 
 
 def _run_download_folder(
@@ -136,25 +177,32 @@ def _run_download_folder(
     timeout_ms: int,
     cooldown_ms: int,
     overwrite: str,
+    browser_debug_url: str | None,
     no_folder_cache: bool,
     no_resume_logs: bool,
 ) -> int:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
+    effective_browser_debug_url = browser_debug_url
+    if effective_browser_debug_url is None and headed:
+        effective_browser_debug_url = DEFAULT_BROWSER_DEBUG_URL
 
-    if not profile_dir.exists():
+    if not profile_dir.exists() and effective_browser_debug_url is None:
         raise RuntimeError("Missing browser auth state. Run: uv run main auth")
 
     staged_downloads_dir = downloads_dir(repo_root)
+    effective_headless = not headed and effective_browser_debug_url is None
+
     report = download_current_folder(
         profile_dir=profile_dir,
         downloads_dir=staged_downloads_dir,
         url=url,
         destination=destination,
-        headless=not headed,
+        headless=effective_headless,
         timeout_ms=timeout_ms,
         cooldown_ms=cooldown_ms,
         overwrite=overwrite,
+        browser_debug_url=effective_browser_debug_url,
         use_folder_cache=not no_folder_cache,
         resume_from_logs=not no_resume_logs,
     )
@@ -185,22 +233,29 @@ def _run_retry_manifest(
     timeout_ms: int,
     cooldown_ms: int,
     overwrite: str,
+    browser_debug_url: str | None,
 ) -> int:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
+    effective_browser_debug_url = browser_debug_url
+    if effective_browser_debug_url is None and headed:
+        effective_browser_debug_url = DEFAULT_BROWSER_DEBUG_URL
 
-    if not profile_dir.exists():
+    if not profile_dir.exists() and effective_browser_debug_url is None:
         raise RuntimeError("Missing browser auth state. Run: uv run main auth")
 
     staged_downloads_dir = downloads_dir(repo_root)
+    effective_headless = not headed and effective_browser_debug_url is None
+
     report = retry_missing_files_from_manifest(
         profile_dir=profile_dir,
         downloads_dir=staged_downloads_dir,
         manifest_path=manifest_path,
-        headless=not headed,
+        headless=effective_headless,
         timeout_ms=timeout_ms,
         cooldown_ms=cooldown_ms,
         overwrite=overwrite,
+        browser_debug_url=effective_browser_debug_url,
     )
     print(f"Manifest: {report.manifest_path}")
     print(f"Retried downloads: {len(report.downloaded)}")
@@ -217,10 +272,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.command == "auth":
-            _run_auth(args.url)
+            _run_auth(args.url, args.browser_debug_url)
             return 0
         if args.command == "browse":
-            _run_browse(args.url)
+            _run_browse(args.url, args.browser_debug_url)
             return 0
         if args.command == "download-folder":
             return _run_download_folder(
@@ -230,6 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_ms=args.timeout_ms,
                 cooldown_ms=args.cooldown_ms,
                 overwrite=args.overwrite,
+                browser_debug_url=args.browser_debug_url,
                 no_folder_cache=args.no_folder_cache,
                 no_resume_logs=args.no_resume_logs,
             )
@@ -242,6 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 timeout_ms=args.timeout_ms,
                 cooldown_ms=args.cooldown_ms,
                 overwrite=args.overwrite,
+                browser_debug_url=args.browser_debug_url,
             )
     except RuntimeError as error:
         print(str(error), file=sys.stderr)

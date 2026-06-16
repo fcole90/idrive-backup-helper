@@ -180,3 +180,23 @@ uv run poe sync-skills
 uv run poe sync-ai-policy
 uv run poe policy-check
 ```
+
+## Persistent browser session for web downloads
+
+The `main` CLI can keep a Playwright-controlled Chromium browser detached from each command run. This avoids reopening the browser and repeating IDrive login/2FA after every script crash or code change.
+
+Open or attach to the persistent browser session with:
+
+```sh
+uv run main browse
+```
+
+The command uses `http://127.0.0.1:9222` by default and stores the Chromium profile under `.agents/playground/browser-state/idrive-chromium`. The command returns after opening the page; the browser process stays open.
+
+Then run headed downloads against the same browser session:
+
+```sh
+uv run main download-folder --headed --url <IDRIVE_FOLDER_URL> --to <DESTINATION>
+```
+
+Use `--browser-debug-url <URL>` on `browse`, `download-folder`, or `retry-manifest` when you want to attach to a different Chromium remote debugging endpoint.

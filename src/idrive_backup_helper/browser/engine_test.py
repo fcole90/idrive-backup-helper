@@ -1,0 +1,137 @@
+from pathlib import Path
+
+import pytest
+
+from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
+
+
+class FakeBrowserContext:
+    def __init__(self) -> None:
+        self.closed = False
+        self.timeout_ms: int | None = None
+        self.page = object()
+        self.pages = [self.page]
+
+    def set_default_timeout(self, timeout_ms: int) -> None:
+        self.timeout_ms = timeout_ms
+
+    def new_page(self) -> object:
+        return self.page
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeBrowser:
+    def __init__(self, context: FakeBrowserContext) -> None:
+        self.contexts = [context]
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeChromium:
+    executable_path = "/tmp/chromium"
+
+    def __init__(self, browser: FakeBrowser) -> None:
+        self.browser = browser
+        self.connected_urls: list[str] = []
+
+    def connect_over_cdp(self, endpoint_url: str, *, timeout: int) -> FakeBrowser:
+        self.connected_urls.append(endpoint_url)
+        assert timeout == 5_000
+        return self.browser
+
+
+class FakePlaywright:
+    def __init__(self, chromium: FakeChromium) -> None:
+        self.chromium = chromium
+
+
+class FakePlaywrightContext:
+    def __init__(self, playwright: FakePlaywright) -> None:
+        self.playwright = playwright
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self) -> FakePlaywright:
+        self.entered = True
+        return self.playwright
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        self.exited = True
+
+
+def test_browser_engine_attaches_to_cdp_without_closing_browser_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = FakeBrowserContext()
+    browser = FakeBrowser(context)
+    chromium = FakeChromium(browser)
+    playwright_context = FakePlaywrightContext(FakePlaywright(chromium))
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.engine.sync_playwright",
+        lambda: playwright_context,
+    )
+
+    config = BrowserConfig(
+        profile_dir=tmp_path / "profile",
+        downloads_dir=tmp_path / "downloads",
+        headless=False,
+        timeout_ms=1234,
+        browser_debug_url="http://127.0.0.1:9222",
+    )
+
+    with BrowserEngine(config) as engine:
+        assert engine.new_page() is context.page
+
+    assert chromium.connected_urls == ["http://127.0.0.1:9222"]
+    assert context.timeout_ms == 1234
+    assert context.closed is False
+    assert browser.closed is False
+    assert playwright_context.exited is True
+
+
+def test_browser_engine_logs_detached_browser_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = FakeBrowserContext()
+    browser = FakeBrowser(context)
+    chromium = FakeChromium(browser)
+    playwright_context = FakePlaywrightContext(FakePlaywright(chromium))
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.engine.sync_playwright",
+        lambda: playwright_context,
+    )
+
+    config = BrowserConfig(
+        profile_dir=tmp_path / "profile",
+        downloads_dir=tmp_path / "downloads",
+        headless=False,
+        timeout_ms=1234,
+        browser_debug_url="http://127.0.0.1:9222",
+    )
+
+    with BrowserEngine(config) as engine:
+        engine.new_page()
+
+    output = capsys.readouterr().out
+    assert "[browser-session] Connecting to Chromium CDP endpoint" in output
+    assert "[browser-session] Attached to existing Chromium CDP endpoint" in output
+    assert (
+        "[browser-session] Using detached browser context with 1 existing page(s)"
+        in output
+    )
+    assert "[browser-session] Opening new page in browser context" in output
+    assert (
+        "[browser-session] Command finished; leaving detached browser running" in output
+    )

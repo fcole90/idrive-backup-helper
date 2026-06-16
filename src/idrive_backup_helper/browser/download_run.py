@@ -63,6 +63,7 @@ def download_current_folder(
     timeout_ms: int,
     cooldown_ms: int,
     overwrite: str,
+    browser_debug_url: str | None = None,
     use_folder_cache: bool = True,
     resume_from_logs: bool = True,
 ) -> DownloadFolderReport:
@@ -73,6 +74,7 @@ def download_current_folder(
         downloads_dir=downloads_dir,
         headless=headless,
         timeout_ms=timeout_ms,
+        browser_debug_url=browser_debug_url,
     )
     started_at = datetime.now()
     progress_log_path = build_progress_log_path(
