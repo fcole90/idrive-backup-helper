@@ -10,6 +10,8 @@ from idrive_backup_helper.browser.download_entries import (
 )
 from idrive_backup_helper.browser.download_models import RemoteEntries
 
+FOLDER_ENTRIES_CACHE_VERSION = 2
+
 
 def _folder_cache_dir(downloads_dir: Path) -> Path:
     return downloads_dir / "folder-cache"
@@ -52,6 +54,7 @@ def write_folder_entries_cache(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = _folder_cache_path(downloads_dir, folder_url)
     payload = {
+        "cacheVersion": FOLDER_ENTRIES_CACHE_VERSION,
         "url": folder_url,
         "cachedAt": datetime.now().isoformat(timespec="seconds"),
         "entries": _serialize_remote_entries(entries),
@@ -76,6 +79,9 @@ def load_folder_entries_cache(
         return None
 
     payload = cast(dict[object, object], payload_object)
+    if payload.get("cacheVersion") != FOLDER_ENTRIES_CACHE_VERSION:
+        return None
+
     entries_object = payload.get("entries")
     if not isinstance(entries_object, list):
         return None

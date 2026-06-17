@@ -1,3 +1,4 @@
+import hashlib
 import json
 import pytest
 
@@ -233,6 +234,36 @@ def test_folder_entries_cache_roundtrip(tmp_path: Path) -> None:
     cached = load_folder_entries_cache(downloads_dir, "https://example.com/root")
 
     assert cached == entries
+
+
+def test_folder_entries_cache_ignores_legacy_unversioned_payload(
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    cache_dir = downloads_dir / "folder-cache"
+    cache_dir.mkdir(parents=True)
+    folder_url = "https://example.com/root"
+    cache_hash = hashlib.sha256(folder_url.encode("utf-8")).hexdigest()
+    cache_path = cache_dir / f"{cache_hash}.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "url": folder_url,
+                "cachedAt": "2026-06-17T12:00:00",
+                "entries": [
+                    {
+                        "entryType": "folder",
+                        "folderName": "stale",
+                        "href": "https://example.com/stale",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_folder_entries_cache(downloads_dir, folder_url) is None
 
 
 def test_resume_success_paths_keep_latest_state(tmp_path: Path) -> None:
