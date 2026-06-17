@@ -213,10 +213,12 @@ def download_current_folder(
                         fileName=remote_file.file_name,
                         relativePath=relative_path,
                     )
+                    log_download_message(f"Discovered remote file: {relative_path}")
 
                     if relative_path in successful_from_logs:
                         log_download_message(
-                            f"Skipping previously successful file: {relative_path}"
+                            "Skipping file without checking IDrive row because resume logs "
+                            f"already record success: {relative_path}"
                         )
                         progress_logger.log(
                             "file_skipped",
@@ -234,7 +236,10 @@ def download_current_folder(
                         continue
 
                     if final_path.exists() and overwrite_mode == "skip":
-                        log_download_message(f"Skipping existing file: {final_path}")
+                        log_download_message(
+                            "Skipping file without checking IDrive row because destination "
+                            f"already exists: {final_path}"
+                        )
                         progress_logger.log(
                             "file_skipped",
                             fileName=remote_file.file_name,
@@ -251,6 +256,10 @@ def download_current_folder(
                         continue
 
                     if not folder_page_loaded_for_download:
+                        log_download_message(
+                            "Loading folder page before first download attempt: "
+                            f"{folder_task.url}"
+                        )
                         ensure_folder_loaded_for_download(
                             page,
                             target_url=folder_task.url,
@@ -260,6 +269,10 @@ def download_current_folder(
                         )
                         folder_page_loaded_for_download = True
 
+                    log_download_message(
+                        "Attempting IDrive download for remote file: "
+                        f"{relative_path}"
+                    )
                     progress_logger.log(
                         "file_download_started",
                         fileName=remote_file.file_name,
