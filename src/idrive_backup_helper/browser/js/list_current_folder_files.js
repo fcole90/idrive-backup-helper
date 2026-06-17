@@ -1,5 +1,13 @@
 async ({ scrollIntervalMs, maxIdleTicks }) => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const resolveHref = (el) => {
+    const raw = el.getAttribute("href") || "";
+    try {
+      return new URL(raw, location.origin).href;
+    } catch (_) {
+      return el.href;
+    }
+  };
 
   async function scrollCurrentViewToBottom() {
     const scrollingEl = document.scrollingElement || document.body;
@@ -36,7 +44,7 @@ async ({ scrollIntervalMs, maxIdleTicks }) => {
         return {
           entryType: "folder",
           folderName,
-          href: folderAnchor.href,
+          href: resolveHref(folderAnchor),
         };
       }
 
