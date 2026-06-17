@@ -26,7 +26,11 @@ from idrive_backup_helper.browser.download_entries import (
     ensure_raw_file_list,
     parse_remote_entries,
 )
-from idrive_backup_helper.browser.download_models import RemoteEntries, RemoteFile
+from idrive_backup_helper.browser.download_models import (
+    RemoteEntries,
+    RemoteFile,
+    RemoteFolder,
+)
 from idrive_backup_helper.browser.session import ensure_authenticated_page
 
 FOLDER_SETTLE_POLL_MS = 1_000
@@ -342,11 +346,37 @@ def _ensure_click_result(raw_result: object, folder_name: str) -> None:
     raise RuntimeError(f"Folder click failed for {folder_name}")
 
 
+def _normalize_folder_href(href: str) -> str:
+    parsed = urlparse(href)
+    if parsed.hostname is None or parsed.hostname.lower() not in IDRIVE_HOST_NAMES:
+        return href
+    # Detect doubled /idrive/home prefix caused by relative href resolution against
+    # the IDrive home page when the SPA navigates without updating window.location.
+    if not unquote(parsed.path).startswith(IDRIVE_HOME_PATH * 2):
+        return href
+    fixed_path = parsed.path[len(IDRIVE_HOME_PATH) :]
+    _log(f"Corrected doubled IDrive home prefix in href: {href!r}")
+    return urlunparse((parsed.scheme, parsed.netloc, fixed_path, "", "", ""))
+
+
+def _normalize_remote_entries_hrefs(entries: RemoteEntries) -> RemoteEntries:
+    fixed_folders = [
+        RemoteFolder(
+            folder_name=f.folder_name,
+            href=_normalize_folder_href(f.href),
+        )
+        for f in entries.folders
+    ]
+    if fixed_folders == list(entries.folders):
+        return entries
+    return RemoteEntries(files=entries.files, folders=fixed_folders)
+
+
 def _ensure_idrive_click_path(target_url: str, path_parts: list[str]) -> None:
     if not _is_idrive_url(target_url) or not path_parts:
         return
 
-    if path_parts[:2] == ["idrive", "home"] or path_parts[0] in {"idrive", "home"}:
+    if path_parts[:2] == ["idrive", "home"]:
         raise RuntimeError(
             "Resolved IDrive click path includes the fixed /idrive/home prefix: "
             f"{path_parts}. Refusing to click the wrong folder."
@@ -503,6 +533,7 @@ def load_folder_entries_with_retry(
                     f"{target_url}"
                 )
             else:
+                cached_entries = _normalize_remote_entries_hrefs(cached_entries)
                 _log(
                     "Using cached folder entries: "
                     f"{target_url} ({len(cached_entries.files)} file(s), "
@@ -523,7 +554,9 @@ def load_folder_entries_with_retry(
                 allow_interactive_login=allow_interactive_login,
                 expected_folder_name=expected_folder_name,
             )
-            entries = _evaluate_current_folder_entries(page)
+            entries = _normalize_remote_entries_hrefs(
+                _evaluate_current_folder_entries(page)
+            )
             _log(
                 f"Folder entries attempt {attempt}: found {len(entries.files)} file(s), "
                 f"{len(entries.folders)} folder(s)"

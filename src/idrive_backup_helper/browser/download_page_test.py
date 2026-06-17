@@ -5,11 +5,17 @@ from typing import cast
 import pytest
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from idrive_backup_helper.browser.download_models import RemoteEntries, RemoteFile
+from idrive_backup_helper.browser.download_models import (
+    RemoteEntries,
+    RemoteFile,
+    RemoteFolder,
+)
 from idrive_backup_helper.browser.download_page import (
     DOWNLOAD_START_TIMEOUT_MS,
     FOLDER_SETTLE_STABLE_TICKS,
     SelectorState,
+    _normalize_folder_href,
+    _normalize_remote_entries_hrefs,
     download_one_file,
     idrive_folder_path_parts,
     is_current_folder_url,
@@ -266,6 +272,65 @@ def test_is_current_folder_url_preserves_non_idrive_query_params() -> None:
         )
         is False
     )
+
+
+def test_normalize_folder_href_fixes_doubled_idrive_home_prefix() -> None:
+    assert (
+        _normalize_folder_href(
+            "https://www.idrive.com/idrive/home/idrive/home/DEVICE/drive/folder"
+        )
+        == "https://www.idrive.com/idrive/home/DEVICE/drive/folder"
+    )
+
+
+def test_normalize_folder_href_leaves_correct_idrive_url_unchanged() -> None:
+    url = "https://www.idrive.com/idrive/home/DEVICE/drive/folder"
+    assert _normalize_folder_href(url) == url
+
+
+def test_normalize_folder_href_leaves_non_idrive_url_unchanged() -> None:
+    url = "https://example.com/idrive/home/idrive/home/DEVICE"
+    assert _normalize_folder_href(url) == url
+
+
+def test_normalize_remote_entries_hrefs_fixes_doubled_subfolder_hrefs() -> None:
+    entries = RemoteEntries(
+        files=[
+            RemoteFile(
+                file_name="a.txt",
+                row_index=0,
+                server_size_text=None,
+                server_modified_text=None,
+            )
+        ],
+        folders=[
+            RemoteFolder(
+                folder_name="DEVICE",
+                href="https://www.idrive.com/idrive/home/idrive/home/DEVICE/drive/folder",
+            )
+        ],
+    )
+    normalized = _normalize_remote_entries_hrefs(entries)
+    assert (
+        normalized.folders[0].href
+        == "https://www.idrive.com/idrive/home/DEVICE/drive/folder"
+    )
+    assert normalized.files == entries.files
+
+
+def test_normalize_remote_entries_hrefs_returns_same_object_when_no_fix_needed() -> (
+    None
+):
+    entries = RemoteEntries(
+        files=[],
+        folders=[
+            RemoteFolder(
+                folder_name="DEVICE",
+                href="https://www.idrive.com/idrive/home/DEVICE/drive/folder",
+            )
+        ],
+    )
+    assert _normalize_remote_entries_hrefs(entries) is entries
 
 
 def test_idrive_folder_path_parts_decodes_target_path() -> None:
