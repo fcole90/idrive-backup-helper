@@ -1,6 +1,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
+import random
 import time
 from typing import Literal
 from typing import Protocol
@@ -33,6 +35,11 @@ FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
 DOWNLOAD_START_TIMEOUT_MS = 60_000
+IDRIVE_HOME_PATH = "/idrive/home"
+IDRIVE_HOST_NAMES = {"idrive.com", "www.idrive.com"}
+IDRIVE_NAVIGATION_BUILD_ID = "ui-click-prefix-v3"
+FOLDER_CLICK_SETTLE_MIN_MS = 700
+FOLDER_CLICK_SETTLE_MAX_MS = 1_800
 type SelectorState = Literal["attached", "detached", "hidden", "visible"]
 
 
@@ -66,7 +73,10 @@ def _load_js_asset(name: str) -> str:
     if not asset_path.exists():
         raise RuntimeError(f"Missing browser script asset: {asset_path}")
 
-    return asset_path.read_text(encoding="utf-8")
+    script = asset_path.read_text(encoding="utf-8")
+    digest = hashlib.sha256(script.encode("utf-8")).hexdigest()[:12]
+    _log(f"Loaded browser script asset: {asset_path.name} sha256={digest}")
+    return script
 
 
 def _ensure_trigger_result(raw_result: object, file_name: str) -> None:
@@ -100,8 +110,10 @@ def _evaluate_current_folder_entries(page: Page) -> RemoteEntries:
 def _normalized_folder_url(url: str) -> str:
     parsed_url = urlparse(url)
     path = unquote(parsed_url.path).rstrip("/")
-    query_pairs = sorted(parse_qsl(parsed_url.query, keep_blank_values=True))
-    query = "&".join(f"{key}={value}" for key, value in query_pairs)
+    query = ""
+    if not (_is_idrive_url(url) and path.startswith(IDRIVE_HOME_PATH)):
+        query_pairs = sorted(parse_qsl(parsed_url.query, keep_blank_values=True))
+        query = "&".join(f"{key}={value}" for key, value in query_pairs)
     return urlunparse(
         (
             parsed_url.scheme.lower(),
@@ -114,11 +126,64 @@ def _normalized_folder_url(url: str) -> str:
     )
 
 
+def _is_idrive_url(url: str) -> bool:
+    parsed_url = urlparse(url)
+    host_name = parsed_url.hostname
+    return host_name is not None and host_name.lower() in IDRIVE_HOST_NAMES
+
+
+def idrive_folder_path_parts(url: str) -> list[str]:
+    if not _is_idrive_url(url):
+        return []
+
+    parsed_url = urlparse(url)
+    path_parts = [unquote(part) for part in parsed_url.path.split("/") if part]
+    if len(path_parts) < 2 or path_parts[:2] != ["idrive", "home"]:
+        raise RuntimeError(
+            "IDrive folder URLs must start with /idrive/home, " f"got: {url}"
+        )
+
+    return path_parts[2:]
+
+
+def _idrive_home_url(url: str) -> str:
+    parsed_url = urlparse(url)
+    return urlunparse(
+        (
+            parsed_url.scheme,
+            parsed_url.netloc,
+            IDRIVE_HOME_PATH,
+            "",
+            "",
+            "",
+        )
+    )
+
+
 def is_current_folder_url(current_url: str, target_url: str) -> bool:
     if not current_url or current_url == "about:blank":
         return False
 
     return _normalized_folder_url(current_url) == _normalized_folder_url(target_url)
+
+
+def _human_delay_ms() -> int:
+    return random.randint(FOLDER_CLICK_SETTLE_MIN_MS, FOLDER_CLICK_SETTLE_MAX_MS)
+
+
+def _looks_like_idrive_device_id(value: str) -> bool:
+    return len(value) >= 8 and value.isalnum() and any(char.isdigit() for char in value)
+
+
+def _folder_click_name_candidates(path_part: str, path_index: int) -> list[str]:
+    if path_index != 0:
+        return [path_part]
+
+    display_name, separator, suffix = path_part.rpartition("_")
+    if not separator or not display_name or not _looks_like_idrive_device_id(suffix):
+        return [path_part]
+
+    return [display_name, path_part]
 
 
 @dataclass(frozen=True)
@@ -261,6 +326,107 @@ def _ensure_expected_folder_loaded(
     )
 
 
+def _ensure_click_result(raw_result: object, folder_name: str) -> None:
+    if not isinstance(raw_result, dict):
+        return
+
+    result_dict = cast(dict[object, object], raw_result)
+    ok_value = result_dict.get("ok")
+    if ok_value is True:
+        return
+
+    reason_value = result_dict.get("reason")
+    if isinstance(reason_value, str) and reason_value:
+        raise RuntimeError(reason_value)
+
+    raise RuntimeError(f"Folder click failed for {folder_name}")
+
+
+def _ensure_idrive_click_path(target_url: str, path_parts: list[str]) -> None:
+    if not _is_idrive_url(target_url) or not path_parts:
+        return
+
+    if path_parts[:2] == ["idrive", "home"] or path_parts[0] in {"idrive", "home"}:
+        raise RuntimeError(
+            "Resolved IDrive click path includes the fixed /idrive/home prefix: "
+            f"{path_parts}. Refusing to click the wrong folder."
+        )
+
+
+def _idrive_click_start_index(current_url: str, target_path_parts: list[str]) -> int:
+    if not _is_idrive_url(current_url):
+        return 0
+
+    try:
+        current_path_parts = idrive_folder_path_parts(current_url)
+    except RuntimeError:
+        return 0
+
+    if len(current_path_parts) > len(target_path_parts):
+        return 0
+
+    if target_path_parts[: len(current_path_parts)] != current_path_parts:
+        return 0
+
+    return len(current_path_parts)
+
+
+def navigate_to_folder_with_clicks(
+    page: Page, target_url: str, timeout_ms: int
+) -> None:
+    _log(
+        "IDrive navigation implementation "
+        f"{IDRIVE_NAVIGATION_BUILD_ID} from {Path(__file__).resolve()}"
+    )
+    path_parts = idrive_folder_path_parts(target_url)
+    _ensure_idrive_click_path(target_url, path_parts)
+    if not path_parts:
+        _log(f"Navigating folder page directly: {target_url}")
+        page.goto(target_url, wait_until="domcontentloaded")
+        return
+
+    if _is_idrive_url(target_url):
+        click_path = [
+            _folder_click_name_candidates(path_part, index)[0]
+            for index, path_part in enumerate(path_parts)
+        ]
+        _log(f"Resolved IDrive click path: {' / '.join(click_path)}")
+
+    home_url = _idrive_home_url(target_url)
+    start_index = _idrive_click_start_index(page.url, path_parts)
+    if start_index > 0:
+        current_prefix = " / ".join(path_parts[:start_index])
+        _log(f"Current tab is already at IDrive path prefix: {current_prefix}")
+    elif not is_current_folder_url(page.url, home_url):
+        _log(f"Navigating to IDrive home before folder clicks: {home_url}")
+        page.goto(home_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(_human_delay_ms())
+
+    click_folder_script = _load_js_asset("click_folder_by_name.js")
+    for index, folder_name in enumerate(path_parts[start_index:], start=start_index):
+        folder_name_candidates = _folder_click_name_candidates(folder_name, index)
+        display_folder_name = folder_name_candidates[0]
+        wait_for_folder_view_settle(page, timeout_ms)
+        if display_folder_name == folder_name:
+            _log(f"Opening folder via UI click: {folder_name}")
+        else:
+            _log(
+                "Opening folder via UI click: "
+                f"{display_folder_name} (URL segment: {folder_name})"
+            )
+        click_result: object = page.evaluate(
+            click_folder_script,
+            {
+                "folderName": display_folder_name,
+                "folderNameCandidates": folder_name_candidates,
+                "settleMinMs": FOLDER_CLICK_SETTLE_MIN_MS,
+                "settleMaxMs": FOLDER_CLICK_SETTLE_MAX_MS,
+            },
+        )
+        _ensure_click_result(click_result, display_folder_name)
+        page.wait_for_timeout(_human_delay_ms())
+
+
 def _load_folder_with_retry(
     page: Page,
     *,
@@ -286,8 +452,10 @@ def _load_folder_with_retry(
             if is_current_folder_url(page.url, target_url):
                 _log(f"Current tab is already at target folder: {target_url}")
             else:
-                _log(f"Navigating folder page from {page.url} to {target_url}")
-                page.goto(target_url, wait_until="domcontentloaded")
+                _log(
+                    f"Navigating folder page by UI clicks from {page.url} to {target_url}"
+                )
+                navigate_to_folder_with_clicks(page, target_url, timeout_ms)
             ensure_authenticated_page(
                 page,
                 target_url=target_url,
