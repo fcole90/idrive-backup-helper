@@ -293,6 +293,20 @@ def test_normalize_folder_href_leaves_non_idrive_url_unchanged() -> None:
     assert _normalize_folder_href(url) == url
 
 
+def test_normalize_folder_href_decodes_html_entity_apostrophe() -> None:
+    # IDrive leaves an HTML &#39; in the path; the bare '#' would otherwise be
+    # parsed as a fragment and truncate the folder name to "Quando scatta l&".
+    normalized = _normalize_folder_href(
+        "https://www.idrive.com/idrive/home/path/to/"
+        "Quando%20scatta%20l&#39;allerta%20-%20Scienza%26Tecnica_files"
+    )
+    assert idrive_folder_path_parts(normalized) == [
+        "path",
+        "to",
+        "Quando scatta l'allerta - Scienza&Tecnica_files",
+    ]
+
+
 def test_normalize_remote_entries_hrefs_fixes_doubled_subfolder_hrefs() -> None:
     entries = RemoteEntries(
         files=[

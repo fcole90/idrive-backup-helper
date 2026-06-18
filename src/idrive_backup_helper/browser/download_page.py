@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
+import html
 from pathlib import Path
 import random
 import time
@@ -346,7 +347,21 @@ def _ensure_click_result(raw_result: object, folder_name: str) -> None:
     raise RuntimeError(f"Folder click failed for {folder_name}")
 
 
+def _decode_html_entities_in_href(href: str) -> str:
+    # IDrive sometimes builds folder hrefs with HTML character references left in
+    # the path (for example an apostrophe encoded as &#39; instead of %27). The
+    # bare '#' then gets parsed as a URL fragment delimiter, truncating the path
+    # (".../Quando scatta l&" instead of ".../Quando scatta l'allerta - ...") and
+    # the folder click later fails to find the row. Decode the entities back to
+    # their characters before any URL parsing so the full path survives.
+    decoded = html.unescape(href)
+    if decoded != href:
+        _log(f"Decoded HTML entities in folder href: {href!r} -> {decoded!r}")
+    return decoded
+
+
 def _normalize_folder_href(href: str) -> str:
+    href = _decode_html_entities_in_href(href)
     parsed = urlparse(href)
     if parsed.hostname is None or parsed.hostname.lower() not in IDRIVE_HOST_NAMES:
         return href
