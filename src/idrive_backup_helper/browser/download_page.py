@@ -360,7 +360,7 @@ def _decode_html_entities_in_href(href: str) -> str:
     return decoded
 
 
-def _normalize_folder_href(href: str) -> str:
+def normalize_folder_href(href: str) -> str:
     href = _decode_html_entities_in_href(href)
     parsed = urlparse(href)
     if parsed.hostname is None or parsed.hostname.lower() not in IDRIVE_HOST_NAMES:
@@ -374,11 +374,11 @@ def _normalize_folder_href(href: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, fixed_path, "", "", ""))
 
 
-def _normalize_remote_entries_hrefs(entries: RemoteEntries) -> RemoteEntries:
+def normalize_remote_entries_hrefs(entries: RemoteEntries) -> RemoteEntries:
     fixed_folders = [
         RemoteFolder(
             folder_name=f.folder_name,
-            href=_normalize_folder_href(f.href),
+            href=normalize_folder_href(f.href),
         )
         for f in entries.folders
     ]
@@ -548,7 +548,7 @@ def load_folder_entries_with_retry(
                     f"{target_url}"
                 )
             else:
-                cached_entries = _normalize_remote_entries_hrefs(cached_entries)
+                cached_entries = normalize_remote_entries_hrefs(cached_entries)
                 _log(
                     "Using cached folder entries: "
                     f"{target_url} ({len(cached_entries.files)} file(s), "
@@ -569,7 +569,7 @@ def load_folder_entries_with_retry(
                 allow_interactive_login=allow_interactive_login,
                 expected_folder_name=expected_folder_name,
             )
-            entries = _normalize_remote_entries_hrefs(
+            entries = normalize_remote_entries_hrefs(
                 _evaluate_current_folder_entries(page)
             )
             _log(

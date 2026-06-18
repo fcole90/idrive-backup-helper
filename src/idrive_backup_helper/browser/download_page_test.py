@@ -14,8 +14,8 @@ from idrive_backup_helper.browser.download_page import (
     DOWNLOAD_START_TIMEOUT_MS,
     FOLDER_SETTLE_STABLE_TICKS,
     SelectorState,
-    _normalize_folder_href,
-    _normalize_remote_entries_hrefs,
+    normalize_folder_href,
+    normalize_remote_entries_hrefs,
     download_one_file,
     idrive_folder_path_parts,
     is_current_folder_url,
@@ -276,7 +276,7 @@ def test_is_current_folder_url_preserves_non_idrive_query_params() -> None:
 
 def test_normalize_folder_href_fixes_doubled_idrive_home_prefix() -> None:
     assert (
-        _normalize_folder_href(
+        normalize_folder_href(
             "https://www.idrive.com/idrive/home/idrive/home/DEVICE/drive/folder"
         )
         == "https://www.idrive.com/idrive/home/DEVICE/drive/folder"
@@ -285,18 +285,18 @@ def test_normalize_folder_href_fixes_doubled_idrive_home_prefix() -> None:
 
 def test_normalize_folder_href_leaves_correct_idrive_url_unchanged() -> None:
     url = "https://www.idrive.com/idrive/home/DEVICE/drive/folder"
-    assert _normalize_folder_href(url) == url
+    assert normalize_folder_href(url) == url
 
 
 def test_normalize_folder_href_leaves_non_idrive_url_unchanged() -> None:
     url = "https://example.com/idrive/home/idrive/home/DEVICE"
-    assert _normalize_folder_href(url) == url
+    assert normalize_folder_href(url) == url
 
 
 def test_normalize_folder_href_decodes_html_entity_apostrophe() -> None:
     # IDrive leaves an HTML &#39; in the path; the bare '#' would otherwise be
     # parsed as a fragment and truncate the folder name to "Quando scatta l&".
-    normalized = _normalize_folder_href(
+    normalized = normalize_folder_href(
         "https://www.idrive.com/idrive/home/path/to/"
         "Quando%20scatta%20l&#39;allerta%20-%20Scienza%26Tecnica_files"
     )
@@ -324,7 +324,7 @@ def test_normalize_remote_entries_hrefs_fixes_doubled_subfolder_hrefs() -> None:
             )
         ],
     )
-    normalized = _normalize_remote_entries_hrefs(entries)
+    normalized = normalize_remote_entries_hrefs(entries)
     assert (
         normalized.folders[0].href
         == "https://www.idrive.com/idrive/home/DEVICE/drive/folder"
@@ -344,7 +344,7 @@ def test_normalize_remote_entries_hrefs_returns_same_object_when_no_fix_needed()
             )
         ],
     )
-    assert _normalize_remote_entries_hrefs(entries) is entries
+    assert normalize_remote_entries_hrefs(entries) is entries
 
 
 def test_idrive_folder_path_parts_decodes_target_path() -> None:
