@@ -18,7 +18,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-downloads/
+.claude/playground/
 eggs/
 .eggs/
 lib/
