@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import cast
 
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads.download_models import (
     DownloadFolderReport,
     DownloadManifest,
     ManifestFileRecord,

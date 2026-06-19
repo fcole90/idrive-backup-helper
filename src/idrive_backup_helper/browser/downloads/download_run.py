@@ -2,16 +2,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-from idrive_backup_helper.browser.download_cache import (
+from idrive_backup_helper.browser.downloads.download_cache import (
     load_resume_success_relative_paths,
 )
-from idrive_backup_helper.browser.download_manifest import (
+from idrive_backup_helper.browser.downloads.download_manifest import (
     build_manifest_path,
     ensure_destination_dir,
     relative_path_from_destination,
     write_manifest,
 )
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads.download_models import (
     DownloadFolderReport,
     DownloadedFile,
     FailedFile,
@@ -21,16 +21,16 @@ from idrive_backup_helper.browser.download_models import (
     RemoteFile,
     SkippedFile,
 )
-from idrive_backup_helper.browser.download_page import (
+from idrive_backup_helper.browser.downloads.download_page import (
     ensure_folder_loaded_for_download,
     load_folder_entries_with_retry,
 )
-from idrive_backup_helper.browser.download_progress import (
+from idrive_backup_helper.browser.downloads.download_progress import (
     ProgressEventLogger,
     build_progress_log_path,
     log_download_message,
 )
-from idrive_backup_helper.browser.download_transfer import (
+from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
 )
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine

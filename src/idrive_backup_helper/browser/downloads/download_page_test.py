@@ -5,12 +5,12 @@ from typing import cast
 import pytest
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads.download_models import (
     RemoteEntries,
     RemoteFile,
     RemoteFolder,
 )
-from idrive_backup_helper.browser.download_page import (
+from idrive_backup_helper.browser.downloads.download_page import (
     DOWNLOAD_START_TIMEOUT_MS,
     FOLDER_SETTLE_STABLE_TICKS,
     SelectorState,

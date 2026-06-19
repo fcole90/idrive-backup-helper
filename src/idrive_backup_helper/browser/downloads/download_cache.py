@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import cast
 
-from idrive_backup_helper.browser.download_entries import (
+from idrive_backup_helper.browser.downloads.download_entries import (
     ensure_raw_file_list,
     parse_remote_entries,
 )
-from idrive_backup_helper.browser.download_models import RemoteEntries
+from idrive_backup_helper.browser.downloads.download_models import RemoteEntries
 
 FOLDER_ENTRIES_CACHE_VERSION = 2
 

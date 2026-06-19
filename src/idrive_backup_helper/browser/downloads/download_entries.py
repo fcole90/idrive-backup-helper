@@ -1,6 +1,6 @@
 from typing import cast
 
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads.download_models import (
     RemoteEntries,
     RemoteFile,
     RemoteFolder,

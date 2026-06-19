@@ -2,7 +2,7 @@ import hashlib
 import json
 import pytest
 
-from idrive_backup_helper.browser.downloads import (
+from idrive_backup_helper.browser.downloads.downloads import (
     RemoteEntries,
     RemoteFile,
     DownloadFolderReport,

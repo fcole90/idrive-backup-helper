@@ -2,13 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from idrive_backup_helper.browser import download_run
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads import download_run
+from idrive_backup_helper.browser.downloads.download_models import (
     DownloadedFile,
     RemoteEntries,
     RemoteFile,
 )
-from idrive_backup_helper.browser.download_run import download_current_folder
+from idrive_backup_helper.browser.downloads.download_run import download_current_folder
 
 
 class FakeBrowserEngine:

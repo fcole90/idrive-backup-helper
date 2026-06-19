@@ -3,7 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from idrive_backup_helper.browser.downloads import (
+from idrive_backup_helper.browser.downloads.downloads import (
     download_current_folder,
     retry_missing_files_from_manifest,
     verify_download_manifest,

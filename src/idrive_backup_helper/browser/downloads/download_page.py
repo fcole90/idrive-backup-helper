@@ -19,15 +19,15 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from idrive_backup_helper.browser.download_cache import (
+from idrive_backup_helper.browser.downloads.download_cache import (
     load_folder_entries_cache,
     write_folder_entries_cache,
 )
-from idrive_backup_helper.browser.download_entries import (
+from idrive_backup_helper.browser.downloads.download_entries import (
     ensure_raw_file_list,
     parse_remote_entries,
 )
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads.download_models import (
     RemoteEntries,
     RemoteFile,
     RemoteFolder,

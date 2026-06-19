@@ -2,8 +2,11 @@ from pathlib import Path
 
 from playwright.sync_api import Page
 
-from idrive_backup_helper.browser.download_models import DownloadedFile, RemoteFile
-from idrive_backup_helper.browser.download_page import download_one_file
+from idrive_backup_helper.browser.downloads.download_models import (
+    DownloadedFile,
+    RemoteFile,
+)
+from idrive_backup_helper.browser.downloads.download_page import download_one_file
 from idrive_backup_helper.filesystem.moves import move_download_to_destination
 
 

@@ -1,23 +1,23 @@
 from pathlib import Path
 
-from idrive_backup_helper.browser.download_cache import (
+from idrive_backup_helper.browser.downloads.download_cache import (
     load_folder_entries_cache,
     load_resume_success_relative_paths,
     write_folder_entries_cache,
 )
-from idrive_backup_helper.browser.download_entries import (
+from idrive_backup_helper.browser.downloads.download_entries import (
     ensure_raw_file_list,
     parse_remote_entries,
     parse_remote_files,
 )
-from idrive_backup_helper.browser.download_manifest import (
+from idrive_backup_helper.browser.downloads.download_manifest import (
     build_manifest_path,
     build_retry_manifest_path,
     ensure_destination_dir,
     load_download_manifest,
     verify_download_manifest,
 )
-from idrive_backup_helper.browser.download_models import (
+from idrive_backup_helper.browser.downloads.download_models import (
     DownloadFolderReport,
     DownloadManifest,
     DownloadedFile,
@@ -31,12 +31,14 @@ from idrive_backup_helper.browser.download_models import (
     RemoteFolder,
     SkippedFile,
 )
-from idrive_backup_helper.browser.download_page import load_folder_entries_with_retry
-from idrive_backup_helper.browser.download_progress import (
+from idrive_backup_helper.browser.downloads.download_page import (
+    load_folder_entries_with_retry,
+)
+from idrive_backup_helper.browser.downloads.download_progress import (
     ProgressEventLogger,
     build_progress_log_path,
 )
-from idrive_backup_helper.browser.download_run import download_current_folder
+from idrive_backup_helper.browser.downloads.download_run import download_current_folder
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 from idrive_backup_helper.browser.retry_run import retry_missing_files_from_manifest
 

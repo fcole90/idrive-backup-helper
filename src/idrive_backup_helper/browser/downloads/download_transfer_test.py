@@ -3,8 +3,8 @@ from typing import Any
 
 import pytest
 
-from idrive_backup_helper.browser.download_models import RemoteFile
-from idrive_backup_helper.browser.download_transfer import (
+from idrive_backup_helper.browser.downloads.download_models import RemoteFile
+from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
 )
 
