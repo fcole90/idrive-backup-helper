@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,93 @@ def test_download_current_folder_logs_file_decisions(
         message == "Attempting IDrive download for remote file: needed.txt"
         for message in messages
     )
+
+
+def test_download_current_folder_redownloads_when_resume_success_file_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    downloads_dir = repo_root / ".agents" / "playground" / "downloads"
+    profile_dir = repo_root / ".agents" / "playground" / "browser-state"
+    destination = tmp_path / "fresh-destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    folder_url = "https://example.com/folder"
+
+    # A manifest from a previous run (a different destination) records both files
+    # as downloaded. The files are NOT present at this fresh destination.
+    manifest = {
+        "url": folder_url,
+        "destination": str(tmp_path / "old-destination"),
+        "finishedAt": "2026-06-15T10:00:00",
+        "downloaded": [
+            {"fileName": "already.txt", "relativePath": "already.txt"},
+            {"fileName": "needed.txt", "relativePath": "needed.txt"},
+        ],
+        "skipped": [],
+        "failed": [],
+    }
+    (downloads_dir / "download-folder-run-2026-06-15T10-00-00.json").write_text(
+        json.dumps(manifest) + "\n",
+        encoding="utf-8",
+    )
+
+    transferred: list[str] = []
+
+    def fake_transfer_remote_file_to_destination(
+        *,
+        page: object,
+        remote_file: RemoteFile,
+        downloads_dir: Path,
+        destination_dir: Path,
+        replace_existing: bool,
+        cooldown_ms: int,
+    ) -> DownloadedFile:
+        transferred.append(remote_file.file_name)
+        staged_path = downloads_dir / remote_file.file_name
+        final_path = destination_dir / remote_file.file_name
+        return DownloadedFile(
+            file_name=remote_file.file_name,
+            staged_path=staged_path,
+            final_path=final_path,
+        )
+
+    monkeypatch.setattr(download_run, "BrowserEngine", FakeBrowserEngine)
+    monkeypatch.setattr(
+        download_run,
+        "load_folder_entries_with_retry",
+        _fake_load_folder_entries_with_retry,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "ensure_folder_loaded_for_download",
+        _fake_ensure_folder_loaded_for_download,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "transfer_remote_file_to_destination",
+        fake_transfer_remote_file_to_destination,
+    )
+
+    report = download_current_folder(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        url=folder_url,
+        destination=destination,
+        headless=False,
+        timeout_ms=60_000,
+        cooldown_ms=1500,
+        overwrite="skip",
+        use_folder_cache=True,
+        resume_from_logs=True,
+    )
+
+    # Both files are re-downloaded because none exist at the fresh destination,
+    # even though the resume log marks them as previously successful.
+    assert sorted(transferred) == ["already.txt", "needed.txt"]
+    assert report.skipped == []
 
 
 def _fake_load_folder_entries_with_retry(

@@ -215,10 +215,10 @@ def download_current_folder(
                     )
                     log_download_message(f"Discovered remote file: {relative_path}")
 
-                    if relative_path in successful_from_logs:
+                    if relative_path in successful_from_logs and final_path.exists():
                         log_download_message(
                             "Skipping file without checking IDrive row because resume logs "
-                            f"already record success: {relative_path}"
+                            f"already record success and it exists locally: {relative_path}"
                         )
                         progress_logger.log(
                             "file_skipped",
