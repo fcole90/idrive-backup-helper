@@ -46,11 +46,11 @@ def test_transfer_remote_file_to_destination_builds_downloaded_file(
         return final_path
 
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_transfer.download_one_file",
+        "idrive_backup_helper.browser.downloads.download_transfer.download_one_file",
         fake_download_one_file,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_transfer.move_download_to_destination",
+        "idrive_backup_helper.browser.downloads.download_transfer.move_download_to_destination",
         fake_move_download_to_destination,
     )
 

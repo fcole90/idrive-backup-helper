@@ -95,19 +95,19 @@ def test_load_folder_entries_accepts_settled_empty_folder(
         load_calls += 1
 
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.load_folder_entries_cache",
+        "idrive_backup_helper.browser.downloads.download_page.load_folder_entries_cache",
         _fake_load_folder_entries_cache,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._load_folder_with_retry",
+        "idrive_backup_helper.browser.downloads.download_page._load_folder_with_retry",
         fake_load_folder_with_retry,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._evaluate_current_folder_entries",
+        "idrive_backup_helper.browser.downloads.download_page._evaluate_current_folder_entries",
         _fake_evaluate_current_folder_entries,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.write_folder_entries_cache",
+        "idrive_backup_helper.browser.downloads.download_page.write_folder_entries_cache",
         _fake_write_folder_entries_cache,
     )
     page_stub = cast(Page, object())
@@ -135,19 +135,19 @@ def test_load_folder_entries_reuses_tab_when_current_url_matches_target(
         url="https://www.idrive.com/idrive/home/device/F/my%20path/fold_2/"
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.ensure_authenticated_page",
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
         _fake_ensure_authenticated_page,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
         _fake_wait_for_folder_view_settle,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._evaluate_current_folder_entries",
+        "idrive_backup_helper.browser.downloads.download_page._evaluate_current_folder_entries",
         _fake_evaluate_current_folder_entries,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.write_folder_entries_cache",
+        "idrive_backup_helper.browser.downloads.download_page.write_folder_entries_cache",
         _fake_write_folder_entries_cache,
     )
 
@@ -174,19 +174,19 @@ def test_load_folder_entries_reuses_tab_when_idrive_query_differs(
         url="https://www.idrive.com/idrive/home/device/F/BACKUP%202/?cache=123"
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.ensure_authenticated_page",
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
         _fake_ensure_authenticated_page,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
         _fake_wait_for_folder_view_settle,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._evaluate_current_folder_entries",
+        "idrive_backup_helper.browser.downloads.download_page._evaluate_current_folder_entries",
         _fake_evaluate_current_folder_entries,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.write_folder_entries_cache",
+        "idrive_backup_helper.browser.downloads.download_page.write_folder_entries_cache",
         _fake_write_folder_entries_cache,
     )
 
@@ -210,19 +210,19 @@ def test_load_folder_entries_navigates_when_current_url_differs(
     page = FakeLoadPage(url="https://www.idrive.com/idrive/home/device/F/fold_1")
     clicked_urls: list[str] = []
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.ensure_authenticated_page",
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
         _fake_ensure_authenticated_page,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
         _fake_wait_for_folder_view_settle,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._evaluate_current_folder_entries",
+        "idrive_backup_helper.browser.downloads.download_page._evaluate_current_folder_entries",
         _fake_evaluate_current_folder_entries,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.write_folder_entries_cache",
+        "idrive_backup_helper.browser.downloads.download_page.write_folder_entries_cache",
         _fake_write_folder_entries_cache,
     )
 
@@ -235,7 +235,7 @@ def test_load_folder_entries_navigates_when_current_url_differs(
         page.url = target_url
 
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.navigate_to_folder_with_clicks",
+        "idrive_backup_helper.browser.downloads.download_page.navigate_to_folder_with_clicks",
         fake_navigate_to_folder_with_clicks,
     )
 
@@ -383,7 +383,7 @@ def test_navigate_to_folder_with_clicks_rejects_leaked_idrive_home_prefix(
         return ["idrive", "home", "device"]
 
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.idrive_folder_path_parts",
+        "idrive_backup_helper.browser.downloads.download_page.idrive_folder_path_parts",
         fake_idrive_folder_path_parts,
     )
 
@@ -399,11 +399,11 @@ def test_navigate_to_folder_with_clicks_uses_device_display_name_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
         _fake_wait_for_folder_view_settle,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._load_js_asset",
+        "idrive_backup_helper.browser.downloads.download_page._load_js_asset",
         _fake_load_js_asset,
     )
     page = FakeClickPage(url="https://www.idrive.com/idrive/home")
@@ -444,11 +444,11 @@ def test_navigate_to_folder_with_clicks_starts_after_current_idrive_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
         _fake_wait_for_folder_view_settle,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._load_js_asset",
+        "idrive_backup_helper.browser.downloads.download_page._load_js_asset",
         _fake_load_js_asset,
     )
     page = FakeClickPage(url="https://www.idrive.com/idrive/home/device/F")
@@ -471,11 +471,11 @@ def test_navigate_to_folder_with_clicks_restarts_from_home_for_different_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page.wait_for_folder_view_settle",
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
         _fake_wait_for_folder_view_settle,
     )
     monkeypatch.setattr(
-        "idrive_backup_helper.browser.download_page._load_js_asset",
+        "idrive_backup_helper.browser.downloads.download_page._load_js_asset",
         _fake_load_js_asset,
     )
     page = FakeClickPage(url="https://www.idrive.com/idrive/home/device/F/other")
