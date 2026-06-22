@@ -8,7 +8,6 @@ import time
 from typing import Literal
 from typing import Protocol
 from typing import cast
-from urllib.parse import parse_qsl
 from urllib.parse import unquote
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
@@ -22,6 +21,12 @@ from playwright.sync_api import (
 from idrive_backup_helper.browser.downloads.download_cache import (
     load_folder_entries_cache,
     write_folder_entries_cache,
+)
+from idrive_backup_helper.browser.downloads.folder_urls import (
+    IDRIVE_HOME_PATH,
+    IDRIVE_HOST_NAMES,
+    is_idrive_url,
+    normalized_folder_url,
 )
 from idrive_backup_helper.browser.downloads.download_entries import (
     ensure_raw_file_list,
@@ -40,8 +45,6 @@ FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
 DOWNLOAD_START_TIMEOUT_MS = 60_000
-IDRIVE_HOME_PATH = "/idrive/home"
-IDRIVE_HOST_NAMES = {"idrive.com", "www.idrive.com"}
 IDRIVE_NAVIGATION_BUILD_ID = "ui-click-prefix-v3"
 FOLDER_CLICK_SETTLE_MIN_MS = 700
 FOLDER_CLICK_SETTLE_MAX_MS = 1_800
@@ -112,33 +115,8 @@ def _evaluate_current_folder_entries(page: Page) -> RemoteEntries:
     return parse_remote_entries(ensure_raw_file_list(raw_files))
 
 
-def _normalized_folder_url(url: str) -> str:
-    parsed_url = urlparse(url)
-    path = unquote(parsed_url.path).rstrip("/")
-    query = ""
-    if not (_is_idrive_url(url) and path.startswith(IDRIVE_HOME_PATH)):
-        query_pairs = sorted(parse_qsl(parsed_url.query, keep_blank_values=True))
-        query = "&".join(f"{key}={value}" for key, value in query_pairs)
-    return urlunparse(
-        (
-            parsed_url.scheme.lower(),
-            parsed_url.netloc.lower(),
-            path,
-            "",
-            query,
-            "",
-        )
-    )
-
-
-def _is_idrive_url(url: str) -> bool:
-    parsed_url = urlparse(url)
-    host_name = parsed_url.hostname
-    return host_name is not None and host_name.lower() in IDRIVE_HOST_NAMES
-
-
 def idrive_folder_path_parts(url: str) -> list[str]:
-    if not _is_idrive_url(url):
+    if not is_idrive_url(url):
         return []
 
     parsed_url = urlparse(url)
@@ -169,7 +147,7 @@ def is_current_folder_url(current_url: str, target_url: str) -> bool:
     if not current_url or current_url == "about:blank":
         return False
 
-    return _normalized_folder_url(current_url) == _normalized_folder_url(target_url)
+    return normalized_folder_url(current_url) == normalized_folder_url(target_url)
 
 
 def _human_delay_ms() -> int:
@@ -388,7 +366,7 @@ def normalize_remote_entries_hrefs(entries: RemoteEntries) -> RemoteEntries:
 
 
 def _ensure_idrive_click_path(target_url: str, path_parts: list[str]) -> None:
-    if not _is_idrive_url(target_url) or not path_parts:
+    if not is_idrive_url(target_url) or not path_parts:
         return
 
     if path_parts[:2] == ["idrive", "home"]:
@@ -399,7 +377,7 @@ def _ensure_idrive_click_path(target_url: str, path_parts: list[str]) -> None:
 
 
 def _idrive_click_start_index(current_url: str, target_path_parts: list[str]) -> int:
-    if not _is_idrive_url(current_url):
+    if not is_idrive_url(current_url):
         return 0
 
     try:
@@ -430,7 +408,7 @@ def navigate_to_folder_with_clicks(
         page.goto(target_url, wait_until="domcontentloaded")
         return
 
-    if _is_idrive_url(target_url):
+    if is_idrive_url(target_url):
         click_path = [
             _folder_click_name_candidates(path_part, index)[0]
             for index, path_part in enumerate(path_parts)
