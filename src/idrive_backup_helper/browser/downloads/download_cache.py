@@ -9,8 +9,21 @@ from idrive_backup_helper.browser.downloads.download_entries import (
     parse_remote_entries,
 )
 from idrive_backup_helper.browser.downloads.download_models import RemoteEntries
+from idrive_backup_helper.browser.downloads.folder_urls import normalized_folder_url
 
-FOLDER_ENTRIES_CACHE_VERSION = 2
+# Bump ONLY when the serialized `entries` shape or field semantics change in a way
+# that makes older payloads unusable by `parse_remote_entries`. Do NOT bump for
+# browser-script or unrelated code changes: a nested-folder crawl can take hours,
+# and the cached listing stays valid across those. Browser scripts are always
+# reloaded from disk at crawl time, so reusing the cache never serves a stale
+# script.
+FOLDER_ENTRIES_DATA_VERSION = 2
+
+# Cache payloads written with one of these versions are structurally compatible
+# with the current parser. They are adopted (and re-stamped to the current
+# version) instead of forcing a re-crawl. `None` covers legacy caches written
+# before the version field existed.
+_ADOPTABLE_DATA_VERSIONS: frozenset[object] = frozenset({None, 2})
 
 
 def _folder_cache_dir(downloads_dir: Path) -> Path:
@@ -18,6 +31,17 @@ def _folder_cache_dir(downloads_dir: Path) -> Path:
 
 
 def _folder_cache_path(downloads_dir: Path, folder_url: str) -> Path:
+    # Key the cache on the normalized URL so trivial differences (trailing slash,
+    # casing, query-parameter order) resolve to the same entry instead of forcing
+    # a fresh crawl.
+    canonical_url = normalized_folder_url(folder_url)
+    url_hash = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
+    return _folder_cache_dir(downloads_dir) / f"{url_hash}.json"
+
+
+def _legacy_folder_cache_path(downloads_dir: Path, folder_url: str) -> Path:
+    # Older caches were keyed on the raw, un-normalized URL. Kept so existing
+    # entries can be adopted and migrated to the normalized key on first read.
     url_hash = hashlib.sha256(folder_url.encode("utf-8")).hexdigest()
     return _folder_cache_dir(downloads_dir) / f"{url_hash}.json"
 
@@ -54,7 +78,7 @@ def write_folder_entries_cache(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = _folder_cache_path(downloads_dir, folder_url)
     payload = {
-        "cacheVersion": FOLDER_ENTRIES_CACHE_VERSION,
+        "cacheVersion": FOLDER_ENTRIES_DATA_VERSION,
         "url": folder_url,
         "cachedAt": datetime.now().isoformat(timespec="seconds"),
         "entries": _serialize_remote_entries(entries),
@@ -67,19 +91,26 @@ def load_folder_entries_cache(
     folder_url: str,
 ) -> RemoteEntries | None:
     cache_path = _folder_cache_path(downloads_dir, folder_url)
-    if not cache_path.exists():
+    legacy_path = _legacy_folder_cache_path(downloads_dir, folder_url)
+
+    if cache_path.exists():
+        source_path = cache_path
+    elif legacy_path.exists():
+        source_path = legacy_path
+    else:
         return None
 
     try:
-        payload_object = json.loads(cache_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        payload_object = json.loads(source_path.read_text(encoding="utf-8"))
+    except OSError, json.JSONDecodeError:
         return None
 
     if not isinstance(payload_object, dict):
         return None
 
     payload = cast(dict[object, object], payload_object)
-    if payload.get("cacheVersion") != FOLDER_ENTRIES_CACHE_VERSION:
+    cache_version = payload.get("cacheVersion")
+    if cache_version not in _ADOPTABLE_DATA_VERSIONS:
         return None
 
     entries_object = payload.get("entries")
@@ -87,9 +118,21 @@ def load_folder_entries_cache(
         return None
 
     try:
-        return parse_remote_entries(ensure_raw_file_list(entries_object))
+        entries = parse_remote_entries(ensure_raw_file_list(entries_object))
     except ValueError:
         return None
+
+    # Lazily migrate a compatible cache so the expensive crawl data is preserved
+    # and not re-validated again: re-stamp an older payload version and/or re-key a
+    # legacy (raw-URL) entry under the current normalized-URL filename.
+    stale_version = cache_version != FOLDER_ENTRIES_DATA_VERSION
+    legacy_key = source_path != cache_path
+    if stale_version or legacy_key:
+        write_folder_entries_cache(downloads_dir, folder_url, entries)
+    if legacy_key:
+        legacy_path.unlink(missing_ok=True)
+
+    return entries
 
 
 def _manifest_paths(downloads_dir: Path) -> list[Path]:
@@ -157,8 +200,12 @@ def load_resume_success_relative_paths(
 
         payload = cast(dict[object, object], payload_object)
         manifest_url = payload.get("url")
-        manifest_destination = payload.get("destination")
-        if manifest_url != url or manifest_destination != str(destination):
+        # Match on the folder URL only. Success is keyed by the URL and the
+        # destination-relative path, so resume knowledge stays valid when the
+        # `--to` destination changes (or the tree is copied to another machine).
+        # The skip decision in download_run re-checks that the file is actually
+        # present at the current destination before trusting this index.
+        if manifest_url != url:
             continue
 
         downloaded_object = payload.get("downloaded")
