@@ -52,7 +52,9 @@ main = "idrive_backup_helper.main:main"
 
 [tool.poe.tasks]
 upgrade-agentic-tools = "uv lock --upgrade-package agentic-tools"
-sync-skills = "uv run agentic-tools skills sync && ln -s .agents/skills ./claude/skills"
+sync-skills-proper = "uv run agentic-tools skills sync"
+make-symlink = "python -c \"from pathlib import Path; t=Path('.claude/skills'); t.unlink(missing_ok=True); t.parent.mkdir(parents=True, exist_ok=True); t.symlink_to('../.agents/skills')\""
+sync-skills = ["sync-skills-proper", "make-symlink"]
 sync-ai-policy = "uv run agentic-tools policy sync"
 sync-ai-policy-import-vscode = "uv run agentic-tools policy import-vscode"
 policy-check = "uv run agentic-tools policy check"
