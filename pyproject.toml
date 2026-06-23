@@ -15,7 +15,7 @@ dev = [
   "pytest>=9.1.1",
   "black>=26.5.1",
   "pyright>=1.1.410",
-  "json5>=0.9",
+  "json5>=0.15.0",
 ]
 
 [build-system]
