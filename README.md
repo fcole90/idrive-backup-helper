@@ -113,6 +113,16 @@ uv run poe lint-fix       # Auto-format code
 uv run poe typecheck      # Run Pyright strict mode
 ```
 
+## Monitoring resource usage
+
+For long-running downloads, watch the memory, handles, and commit/swap of the download process and the browser it drives:
+
+```sh
+uv run python scripts/monitor-resource-usage.py --interval 30 --out usage.csv
+```
+
+It prints a line to the console each interval and appends the full metrics to the CSV. Works on Windows and Linux; stop with Ctrl-C.
+
 ## Legacy scripts
 
 These scripts predate the `main` CLI and are kept for reference.
