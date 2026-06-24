@@ -34,13 +34,12 @@ from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
 )
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
-from idrive_backup_helper.filesystem.listing import DirectoryListingCache
+from idrive_backup_helper.filesystem.listing import existing_entry_names
 
 
 def _precheck_overwrite_conflicts(
     remote_files: list[RemoteFile],
-    destination_listings: DirectoryListingCache,
-    destination: Path,
+    existing_names: set[str],
     overwrite: OverwriteMode,
 ) -> None:
     if overwrite != "fail":
@@ -49,7 +48,7 @@ def _precheck_overwrite_conflicts(
     conflicting_files = [
         remote_file.file_name
         for remote_file in remote_files
-        if destination_listings.contains(destination / remote_file.file_name)
+        if remote_file.file_name in existing_names
     ]
     if conflicting_files:
         joined_names = ", ".join(conflicting_files)
@@ -105,10 +104,6 @@ def download_current_folder(
     ]
     visited_destinations: set[Path] = set()
     successful_from_logs: set[str] = set()
-    # One scandir per destination directory instead of a per-file stat. Existence
-    # checks dominate resume runs and a stat per file is ~1s on slow destinations
-    # (external USB, network mounts); a cached directory listing is in-memory.
-    destination_listings = DirectoryListingCache()
 
     if resume_from_logs and overwrite_mode == "skip":
         successful_from_logs = load_resume_success_relative_paths(
@@ -170,10 +165,13 @@ def download_current_folder(
                     fileCount=len(remote_entries.files),
                     folderCount=len(remote_entries.folders),
                 )
+                # One scandir of this folder's destination replaces a per-file
+                # stat. Existence checks dominate resume runs and a stat per file
+                # is ~1s on slow destinations (external USB, network mounts).
+                folder_existing_names = existing_entry_names(folder_task.destination)
                 _precheck_overwrite_conflicts(
                     remote_entries.files,
-                    destination_listings,
-                    folder_task.destination,
+                    folder_existing_names,
                     overwrite_mode,
                 )
                 folder_page_loaded_for_download = False
@@ -199,6 +197,12 @@ def download_current_folder(
                         )
                     )
 
+                # Partition pass: decide skip-vs-download for every file with no
+                # per-file printing or progress write. On a fully covered folder
+                # the old per-file print + ndjson write cost ~100-200ms each over a
+                # slow terminal, so this is summarized in a single line per folder.
+                files_to_download: list[tuple[RemoteFile, Path, str]] = []
+                skipped_in_folder = 0
                 for remote_file in remote_entries.files:
                     final_path = folder_task.destination / remote_file.file_name
                     relative_path = relative_path_from_destination(
@@ -214,58 +218,47 @@ def download_current_folder(
                             server_modified_text=remote_file.server_modified_text,
                         )
                     )
-                    progress_logger.log(
-                        "file_discovered",
-                        folderUrl=folder_task.url,
-                        fileName=remote_file.file_name,
-                        relativePath=relative_path,
-                    )
-                    log_download_message(f"Discovered remote file: {relative_path}")
 
-                    if relative_path in successful_from_logs and (
-                        destination_listings.contains(final_path)
-                    ):
-                        log_download_message(
-                            "Skipping file without checking IDrive row because resume logs "
-                            f"already record success and it exists locally: {relative_path}"
-                        )
-                        progress_logger.log(
-                            "file_skipped",
-                            fileName=remote_file.file_name,
-                            relativePath=relative_path,
-                            reason="previous run success",
-                        )
-                        skipped.append(
-                            SkippedFile(
-                                file_name=remote_file.file_name,
-                                reason="previous run success",
-                                final_path=final_path,
-                            )
-                        )
-                        continue
-
-                    if destination_listings.contains(final_path) and (
+                    if (
                         overwrite_mode == "skip"
+                        and remote_file.file_name in folder_existing_names
                     ):
-                        log_download_message(
-                            "Skipping file without checking IDrive row because destination "
-                            f"already exists: {final_path}"
-                        )
-                        progress_logger.log(
-                            "file_skipped",
-                            fileName=remote_file.file_name,
-                            relativePath=relative_path,
-                            reason="destination exists",
+                        reason = (
+                            "previous run success"
+                            if relative_path in successful_from_logs
+                            else "destination exists"
                         )
                         skipped.append(
                             SkippedFile(
                                 file_name=remote_file.file_name,
-                                reason="destination exists",
+                                reason=reason,
                                 final_path=final_path,
                             )
                         )
+                        skipped_in_folder += 1
                         continue
 
+                    files_to_download.append((remote_file, final_path, relative_path))
+
+                progress_logger.log(
+                    "folder_files_partitioned",
+                    folderUrl=folder_task.url,
+                    skippedExisting=skipped_in_folder,
+                    toDownload=len(files_to_download),
+                )
+                if not files_to_download:
+                    log_download_message(
+                        f"All {skipped_in_folder} file(s) already present in "
+                        f"{folder_task.destination}; nothing to download"
+                    )
+                else:
+                    log_download_message(
+                        f"{skipped_in_folder} file(s) already present, "
+                        f"{len(files_to_download)} to download in "
+                        f"{folder_task.destination}"
+                    )
+
+                for remote_file, final_path, relative_path in files_to_download:
                     if not folder_page_loaded_for_download:
                         log_download_message(
                             "Loading folder page before first download attempt: "

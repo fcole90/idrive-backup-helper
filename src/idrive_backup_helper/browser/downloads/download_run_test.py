@@ -161,11 +161,8 @@ def test_download_current_folder_logs_file_decisions(
         resume_from_logs=False,
     )
 
-    assert any(message == "Discovered remote file: already.txt" for message in messages)
     assert any(
-        message.startswith(
-            "Skipping file without checking IDrive row because destination already exists"
-        )
+        message.startswith("1 file(s) already present, 1 to download in")
         for message in messages
     )
     assert any(
