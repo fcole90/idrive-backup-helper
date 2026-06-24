@@ -28,6 +28,7 @@ from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
 )
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
+from idrive_backup_helper.filesystem.listing import DirectoryListingCache
 
 
 def retry_missing_files_from_manifest(
@@ -42,8 +43,14 @@ def retry_missing_files_from_manifest(
     browser_debug_url: str | None = None,
 ) -> DownloadFolderReport:
     manifest = load_download_manifest(manifest_path)
+    # One scandir per parent directory instead of a stat per discovered file; the
+    # manifest can list a very large tree and per-file stats are ~1s on slow
+    # destinations (external USB, network mounts).
+    startup_listings = DirectoryListingCache()
     targets = [
-        item for item in manifest.discovered_files if not item.final_path.exists()
+        item
+        for item in manifest.discovered_files
+        if not startup_listings.contains(item.final_path)
     ]
     overwrite_mode = cast(OverwriteMode, overwrite)
     started_at = datetime.now()

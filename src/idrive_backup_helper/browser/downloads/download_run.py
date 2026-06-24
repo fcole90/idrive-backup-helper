@@ -34,10 +34,12 @@ from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
 )
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
+from idrive_backup_helper.filesystem.listing import DirectoryListingCache
 
 
 def _precheck_overwrite_conflicts(
     remote_files: list[RemoteFile],
+    destination_listings: DirectoryListingCache,
     destination: Path,
     overwrite: OverwriteMode,
 ) -> None:
@@ -47,7 +49,7 @@ def _precheck_overwrite_conflicts(
     conflicting_files = [
         remote_file.file_name
         for remote_file in remote_files
-        if (destination / remote_file.file_name).exists()
+        if destination_listings.contains(destination / remote_file.file_name)
     ]
     if conflicting_files:
         joined_names = ", ".join(conflicting_files)
@@ -103,6 +105,10 @@ def download_current_folder(
     ]
     visited_destinations: set[Path] = set()
     successful_from_logs: set[str] = set()
+    # One scandir per destination directory instead of a per-file stat. Existence
+    # checks dominate resume runs and a stat per file is ~1s on slow destinations
+    # (external USB, network mounts); a cached directory listing is in-memory.
+    destination_listings = DirectoryListingCache()
 
     if resume_from_logs and overwrite_mode == "skip":
         successful_from_logs = load_resume_success_relative_paths(
@@ -166,6 +172,7 @@ def download_current_folder(
                 )
                 _precheck_overwrite_conflicts(
                     remote_entries.files,
+                    destination_listings,
                     folder_task.destination,
                     overwrite_mode,
                 )
@@ -215,7 +222,9 @@ def download_current_folder(
                     )
                     log_download_message(f"Discovered remote file: {relative_path}")
 
-                    if relative_path in successful_from_logs and final_path.exists():
+                    if relative_path in successful_from_logs and (
+                        destination_listings.contains(final_path)
+                    ):
                         log_download_message(
                             "Skipping file without checking IDrive row because resume logs "
                             f"already record success and it exists locally: {relative_path}"
@@ -235,7 +244,9 @@ def download_current_folder(
                         )
                         continue
 
-                    if final_path.exists() and overwrite_mode == "skip":
+                    if destination_listings.contains(final_path) and (
+                        overwrite_mode == "skip"
+                    ):
                         log_download_message(
                             "Skipping file without checking IDrive row because destination "
                             f"already exists: {final_path}"
