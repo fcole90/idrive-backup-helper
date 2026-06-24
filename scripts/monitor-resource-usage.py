@@ -1,23 +1,34 @@
-"""Sample memory usage of an IDrive backup run over time.
+"""Sample resource usage of an IDrive backup run over time (cross-platform).
 
-Run this alongside a real download session to attribute long-session memory
-growth to a layer: our Python process vs the Chromium browser it drives. It only
-reads ``/proc``, so it does not connect to the browser or interfere with the
-running download.
+Run this alongside a real download session to attribute long-session resource
+growth to a layer (our Python process vs the Chromium browser it drives) and to
+test the hypotheses behind a system going sluggish / another app crashing while
+physical RAM is only moderately used. It uses psutil and only *reads* process and
+system counters, so it does not connect to the browser or disturb the download.
 
-    uv run python scripts/monitor-resource-usage.py --interval 30 --out mem.csv
+    uv run python scripts/monitor-resource-usage.py --interval 30 --out usage.csv
 
-Processes are matched by command line:
-- Chromium: the process whose cmdline references the browser profile dir, plus
-  its whole descendant tree (renderers, gpu, zygote) found via parent PID.
-- Python:  any python process whose cmdline references the download subcommand
-  (``download-folder`` / ``retry-manifest``), excluding this monitor.
+For each group (python download process, Chromium process tree) it reports:
+- rss: resident (physical) memory.
+- uss: unique set size = memory private to the process (freed if it died); the
+  best per-process "real footprint" and the analog of Windows Private Bytes.
+- vms: virtual memory size (address space committed/reserved).
+- handles: OS handles (Windows) or open file descriptors (Unix) — a leak here
+  can exhaust system limits while RAM stays low.
+- threads.
 
-For each group it reports resident memory and process count. PSS (proportional
-set size, from ``smaps_rollup``) is preferred because summing plain RSS across
-the many Chromium child processes double-counts shared pages; RSS is reported too
-and used as a fallback when PSS is unavailable. A rising trend in one group's PSS
-points at the leaking layer.
+System-wide it reports physical RAM %, swap/page-file usage, and an approximate
+**commit charge** (used physical + used page file vs their totals). When physical
+RAM looks fine but other apps crash, commit charge or page-file pressure is the
+usual culprit — watch commit% and swap%, not just RAM%.
+
+Peaks (high-water marks) are tracked across the run and printed on exit, to catch
+sudden spikes a coarse interval would otherwise miss; use a small --interval
+during a suspect window.
+
+Note: this does NOT capture GPU/VRAM or Windows GDI/USER objects. If commit,
+handles, and RSS/USS all look flat but the system still degrades, suspect GPU
+memory next (nvidia-smi / Windows "GPU Process Memory" perf counter).
 """
 
 import argparse
@@ -27,151 +38,187 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import psutil
+
 from idrive_backup_helper.filesystem.paths import browser_profile_dir, find_repo_root
 
-_PROC = Path("/proc")
-_VMRSS_RE = re.compile(r"^VmRSS:\s+(\d+)\s+kB", re.MULTILINE)
-_PSS_RE = re.compile(r"^Pss:\s+(\d+)\s+kB", re.MULTILINE)
 _DEFAULT_PYTHON_MATCH = r"download-folder|retry-manifest"
 _SELF_MARKER = "monitor-resource-usage"
-
-
-@dataclass(frozen=True)
-class ProcInfo:
-    pid: int
-    ppid: int
-    cmdline: str
+_MB = 1024 * 1024
 
 
 @dataclass(frozen=True)
 class GroupMem:
     proc_count: int
-    rss_kb: int
-    pss_kb: int | None
+    rss_mb: float
+    uss_mb: float | None
+    vms_mb: float
+    handles: int | None
+    threads: int
 
 
-def _read_text(path: Path) -> str | None:
+@dataclass(frozen=True)
+class SystemMem:
+    phys_percent: float
+    phys_used_mb: float
+    swap_used_mb: float
+    swap_percent: float
+    commit_used_mb: float
+    commit_limit_mb: float
+    commit_percent: float
+
+
+def _cmdline(proc: psutil.Process) -> str:
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
-    except OSError, ValueError:
+        return " ".join(proc.cmdline())
+    except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+        return ""
+
+
+def _matching_processes(
+    profile_marker: str, python_pattern: re.Pattern[str]
+) -> tuple[list[psutil.Process], list[psutil.Process]]:
+    chrome_roots: list[psutil.Process] = []
+    python_by_pid: dict[int, psutil.Process] = {}
+
+    for proc in psutil.process_iter():
+        cmdline = _cmdline(proc)
+        if not cmdline or _SELF_MARKER in cmdline:
+            continue
+        if profile_marker in cmdline:
+            chrome_roots.append(proc)
+        if python_pattern.search(cmdline):
+            python_by_pid[proc.pid] = proc
+
+    chrome_by_pid: dict[int, psutil.Process] = {}
+    for root in chrome_roots:
+        chrome_by_pid[root.pid] = root
+        try:
+            for child in root.children(recursive=True):
+                chrome_by_pid[child.pid] = child
+        except psutil.NoSuchProcess, psutil.AccessDenied:
+            continue
+
+    return list(python_by_pid.values()), list(chrome_by_pid.values())
+
+
+def _proc_handles(proc: psutil.Process) -> int | None:
+    # num_handles on Windows, num_fds on Unix; not all platforms expose both.
+    getter = getattr(proc, "num_handles", None) or getattr(proc, "num_fds", None)
+    if getter is None:
         return None
-
-
-def _read_cmdline(pid: int) -> str | None:
     try:
-        raw = (_PROC / str(pid) / "cmdline").read_bytes()
-    except OSError:
+        return int(getter())
+    except psutil.NoSuchProcess, psutil.AccessDenied:
         return None
-    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
 
 
-def _read_ppid(pid: int) -> int | None:
-    stat = _read_text(_PROC / str(pid) / "stat")
-    if stat is None:
-        return None
-    # comm (field 2) may contain spaces/parens; everything after the final ')'
-    # is space-delimited starting at field 3 (state), so ppid is the 2nd token.
-    close_paren = stat.rfind(")")
-    if close_paren == -1:
-        return None
-    fields = stat[close_paren + 2 :].split()
-    if len(fields) < 2 or not fields[1].isdigit():
-        return None
-    return int(fields[1])
+def _group_mem(procs: list[psutil.Process]) -> GroupMem:
+    count = 0
+    rss = 0
+    vms = 0
+    uss = 0
+    uss_available = False
+    handles = 0
+    handles_available = False
+    threads = 0
 
-
-def _read_rss_kb(pid: int) -> int | None:
-    status = _read_text(_PROC / str(pid) / "status")
-    if status is None:
-        return None
-    match = _VMRSS_RE.search(status)
-    return int(match.group(1)) if match else None
-
-
-def _read_pss_kb(pid: int) -> int | None:
-    rollup = _read_text(_PROC / str(pid) / "smaps_rollup")
-    if rollup is None:
-        return None
-    match = _PSS_RE.search(rollup)
-    return int(match.group(1)) if match else None
-
-
-def _iter_proc_infos() -> list[ProcInfo]:
-    infos: list[ProcInfo] = []
-    for entry in _PROC.iterdir():
-        if not entry.name.isdigit():
+    for proc in procs:
+        try:
+            mem = proc.memory_info()
+        except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
             continue
-        pid = int(entry.name)
-        cmdline = _read_cmdline(pid)
-        ppid = _read_ppid(pid)
-        if cmdline is None or ppid is None:
-            continue
-        infos.append(ProcInfo(pid=pid, ppid=ppid, cmdline=cmdline))
-    return infos
+        count += 1
+        rss += mem.rss
+        vms += mem.vms
 
+        try:
+            uss += proc.memory_full_info().uss
+            uss_available = True
+        except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+            pass
 
-def _descendants(root_pids: set[int], infos: list[ProcInfo]) -> set[int]:
-    children: dict[int, list[int]] = {}
-    for info in infos:
-        children.setdefault(info.ppid, []).append(info.pid)
+        proc_handles = _proc_handles(proc)
+        if proc_handles is not None:
+            handles += proc_handles
+            handles_available = True
 
-    collected: set[int] = set()
-    stack = list(root_pids)
-    while stack:
-        pid = stack.pop()
-        if pid in collected:
-            continue
-        collected.add(pid)
-        stack.extend(children.get(pid, []))
-    return collected
+        try:
+            threads += proc.num_threads()
+        except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+            pass
 
-
-def _group_mem(pids: set[int]) -> GroupMem:
-    rss_total = 0
-    pss_total = 0
-    pss_available = False
-    for pid in pids:
-        rss = _read_rss_kb(pid)
-        if rss is not None:
-            rss_total += rss
-        pss = _read_pss_kb(pid)
-        if pss is not None:
-            pss_total += pss
-            pss_available = True
     return GroupMem(
-        proc_count=len(pids),
-        rss_kb=rss_total,
-        pss_kb=pss_total if pss_available else None,
+        proc_count=count,
+        rss_mb=rss / _MB,
+        uss_mb=(uss / _MB) if uss_available else None,
+        vms_mb=vms / _MB,
+        handles=handles if handles_available else None,
+        threads=threads,
     )
 
 
-def _sample(
-    profile_dir_marker: str, python_pattern: re.Pattern[str]
-) -> tuple[GroupMem, GroupMem]:
-    infos = _iter_proc_infos()
+def _system_mem() -> SystemMem:
+    virtual = psutil.virtual_memory()
+    swap = psutil.swap_memory()
+    # Approximate commit charge: used physical + used page file vs their totals.
+    # This is the constraint that fails allocations (and crashes other apps) when
+    # physical RAM still looks fine.
+    commit_used = virtual.used + swap.used
+    commit_limit = virtual.total + swap.total
+    commit_percent = (commit_used / commit_limit * 100) if commit_limit else 0.0
+    return SystemMem(
+        phys_percent=virtual.percent,
+        phys_used_mb=virtual.used / _MB,
+        swap_used_mb=swap.used / _MB,
+        swap_percent=swap.percent,
+        commit_used_mb=commit_used / _MB,
+        commit_limit_mb=commit_limit / _MB,
+        commit_percent=commit_percent,
+    )
 
-    chrome_roots = {
-        info.pid
-        for info in infos
-        if profile_dir_marker in info.cmdline and _SELF_MARKER not in info.cmdline
-    }
-    chrome_pids = _descendants(chrome_roots, infos)
 
-    python_pids = {
-        info.pid
-        for info in infos
-        if python_pattern.search(info.cmdline) and _SELF_MARKER not in info.cmdline
-    }
-
-    return _group_mem(python_pids), _group_mem(chrome_pids)
+def _fmt(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else ""
 
 
-def _mb(kb: int | None) -> str:
-    return f"{kb / 1024:.1f}" if kb is not None else ""
+def _fmt_or_na(value: float | None) -> str:
+    return f"{value:.1f}" if value is not None else "n/a"
 
 
 def _csv_row(values: list[str]) -> str:
     return ",".join(values) + "\n"
+
+
+_CSV_HEADER = [
+    "timestamp",
+    "py_procs",
+    "py_rss_mb",
+    "py_uss_mb",
+    "py_vms_mb",
+    "py_handles",
+    "py_threads",
+    "chrome_procs",
+    "chrome_rss_mb",
+    "chrome_uss_mb",
+    "chrome_vms_mb",
+    "chrome_handles",
+    "chrome_threads",
+    "phys_percent",
+    "swap_used_mb",
+    "swap_percent",
+    "commit_used_mb",
+    "commit_limit_mb",
+    "commit_percent",
+]
+
+
+def _max_opt(current: float | None, candidate: float | None) -> float | None:
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    return max(current, candidate)
 
 
 def main() -> int:
@@ -203,42 +250,49 @@ def main() -> int:
     args = parser.parse_args()
 
     profile_dir: Path = args.profile_dir or browser_profile_dir(find_repo_root())
-    profile_dir_marker = str(profile_dir)
+    profile_marker = str(profile_dir)
     python_pattern = re.compile(args.python_match)
 
     out_path: Path | None = args.out
     if out_path is not None and not out_path.exists():
-        out_path.write_text(
-            _csv_row(
-                [
-                    "timestamp",
-                    "py_procs",
-                    "py_rss_mb",
-                    "py_pss_mb",
-                    "chrome_procs",
-                    "chrome_rss_mb",
-                    "chrome_pss_mb",
-                ]
-            ),
-            encoding="utf-8",
-        )
+        out_path.write_text(_csv_row(_CSV_HEADER), encoding="utf-8")
 
-    print(f"Monitoring Chromium tree under: {profile_dir_marker}")
+    print(f"Monitoring Chromium tree under: {profile_marker}")
     print(f"Python match: /{args.python_match}/")
     print(f"Interval: {args.interval}s" + ("  (single sample)" if args.once else ""))
     print()
 
+    peak_chrome_uss: float | None = None
+    peak_chrome_vms: float | None = 0.0
+    peak_commit_percent = 0.0
+    peak_swap_percent = 0.0
+
     try:
         while True:
             timestamp = datetime.now().isoformat(timespec="seconds")
-            python_mem, chrome_mem = _sample(profile_dir_marker, python_pattern)
+            python_mem, chrome_mem = _matching_processes(profile_marker, python_pattern)
+            python_group = _group_mem(python_mem)
+            chrome_group = _group_mem(chrome_mem)
+            system = _system_mem()
+
+            peak_chrome_uss = _max_opt(peak_chrome_uss, chrome_group.uss_mb)
+            peak_chrome_vms = _max_opt(peak_chrome_vms, chrome_group.vms_mb)
+            peak_commit_percent = max(peak_commit_percent, system.commit_percent)
+            peak_swap_percent = max(peak_swap_percent, system.swap_percent)
 
             print(
                 f"{timestamp}  "
-                f"python: {python_mem.proc_count}p "
-                f"rss={_mb(python_mem.rss_kb)}MB pss={_mb(python_mem.pss_kb) or 'n/a'}MB  |  "
-                f"chrome: {chrome_mem.proc_count}p "
-                f"rss={_mb(chrome_mem.rss_kb)}MB pss={_mb(chrome_mem.pss_kb) or 'n/a'}MB",
+                f"py: {python_group.proc_count}p "
+                f"uss={_fmt_or_na(python_group.uss_mb)}MB "
+                f"rss={_fmt(python_group.rss_mb)}MB  |  "
+                f"chrome: {chrome_group.proc_count}p "
+                f"uss={_fmt_or_na(chrome_group.uss_mb)}MB "
+                f"rss={_fmt(chrome_group.rss_mb)}MB "
+                f"vms={_fmt(chrome_group.vms_mb)}MB "
+                f"handles={chrome_group.handles if chrome_group.handles is not None else 'n/a'}  |  "
+                f"sys: ram={system.phys_percent:.0f}% "
+                f"commit={system.commit_percent:.0f}% "
+                f"swap={system.swap_percent:.0f}%",
                 flush=True,
             )
 
@@ -248,22 +302,41 @@ def main() -> int:
                         _csv_row(
                             [
                                 timestamp,
-                                str(python_mem.proc_count),
-                                _mb(python_mem.rss_kb),
-                                _mb(python_mem.pss_kb),
-                                str(chrome_mem.proc_count),
-                                _mb(chrome_mem.rss_kb),
-                                _mb(chrome_mem.pss_kb),
+                                str(python_group.proc_count),
+                                _fmt(python_group.rss_mb),
+                                _fmt(python_group.uss_mb),
+                                _fmt(python_group.vms_mb),
+                                str(python_group.handles or ""),
+                                str(python_group.threads),
+                                str(chrome_group.proc_count),
+                                _fmt(chrome_group.rss_mb),
+                                _fmt(chrome_group.uss_mb),
+                                _fmt(chrome_group.vms_mb),
+                                str(chrome_group.handles or ""),
+                                str(chrome_group.threads),
+                                _fmt(system.phys_percent),
+                                _fmt(system.swap_used_mb),
+                                _fmt(system.swap_percent),
+                                _fmt(system.commit_used_mb),
+                                _fmt(system.commit_limit_mb),
+                                _fmt(system.commit_percent),
                             ]
                         )
                     )
 
             if args.once:
-                return 0
+                break
             time.sleep(args.interval)
     except KeyboardInterrupt:
         print("\nStopped.")
-        return 0
+
+    print()
+    print(
+        "Peaks  chrome uss="
+        f"{_fmt_or_na(peak_chrome_uss)}MB  chrome vms={_fmt(peak_chrome_vms)}MB  "
+        f"commit={peak_commit_percent:.0f}%  swap={peak_swap_percent:.0f}%"
+    )
+    return 0
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ dev = [
   "black>=26.5.1",
   "pyright>=1.1.410",
   "json5>=0.15.0",
+  "psutil>=6.1.0",
 ]
 
 [build-system]
