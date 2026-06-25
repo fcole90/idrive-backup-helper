@@ -206,8 +206,13 @@ def _system_mem() -> SystemMem:
 def _disk_free_gb(paths: list[Path]) -> float | None:
     free_values: list[float] = []
     for path in paths:
+        target = str(path)
+        # A bare Windows drive letter ("E:") is drive-relative; disk_usage wants a
+        # real path, so normalize it to the drive root ("E:\\").
+        if re.fullmatch(r"[A-Za-z]:", target):
+            target += "\\"
         try:
-            free_values.append(psutil.disk_usage(str(path)).free / _GB)
+            free_values.append(psutil.disk_usage(target).free / _GB)
         except OSError:
             continue
     return min(free_values) if free_values else None
@@ -368,8 +373,10 @@ def main() -> int:
         type=Path,
         action="append",
         default=None,
-        help="Volume(s) to report free space for; repeatable. Pass your --to "
-        "destination here. Default: the profile dir volume.",
+        help="Path on the volume to report free space for; repeatable. Pass your "
+        "--to destination path (a drive letter like D: also works on Windows), "
+        "not just a name. Default: the profile dir volume. Note: disk busy% and "
+        "read/write rates already cover all disks regardless of this.",
     )
     parser.add_argument(
         "--once", action="store_true", help="Take a single sample and exit"
