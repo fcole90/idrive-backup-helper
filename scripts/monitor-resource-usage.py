@@ -76,7 +76,7 @@ class SystemMem:
 class DiskSample:
     read_bytes: int
     write_bytes: int
-    busy_by_device: dict[str, float]  # cumulative busy_time ms per device
+    busy_by_device: dict[str, float]  # cumulative I/O service time (ms) per device
     free_gb: float | None
 
 
@@ -222,7 +222,14 @@ def _disk_sample(watch_paths: list[Path]) -> DiskSample:
     for device, counters in perdisk.items():
         read_bytes += counters.read_bytes
         write_bytes += counters.write_bytes
-        busy_by_device[device] = float(getattr(counters, "busy_time", 0) or 0)
+        # busy_time is Linux/BSD-only; on Windows fall back to read+write service
+        # time (ms) so disk activity% works there too.
+        busy = getattr(counters, "busy_time", None)
+        if busy is None:
+            busy = (getattr(counters, "read_time", 0) or 0) + (
+                getattr(counters, "write_time", 0) or 0
+            )
+        busy_by_device[device] = float(busy)
     return DiskSample(
         read_bytes=read_bytes,
         write_bytes=write_bytes,
@@ -290,7 +297,11 @@ def _busy_percent(
         if pct > best_pct:
             best_pct = pct
             best_device = device
-    return (best_pct, best_device) if best_pct >= 0 else (None, "")
+    if best_pct < 0:
+        return None, ""
+    # read+write service time can exceed wall time with concurrent I/O; clamp so
+    # the value reads as "% of time the disk was busy" (100 = saturated).
+    return min(100.0, best_pct), best_device
 
 
 def _fmt(value: float | None) -> str:
