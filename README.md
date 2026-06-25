@@ -118,12 +118,10 @@ uv run poe typecheck      # Run Pyright strict mode
 For long-running downloads, watch the memory, disk I/O, and GPU usage of the download process and the browser it drives:
 
 ```sh
-uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/playground --disk "/media/me/backup/device-2"
+uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/playground --to-destination "/media/me/backup/device-2"
 ```
 
-On Windows, pass the destination path or drive root, e.g. `--disk "D:\Backups"` (a bare `D:` is also accepted).
-
-`--out` is a directory; the script writes one timestamped `usage-<start>.csv` per run into it (`.agents/playground` is the ignored scratch folder). `--disk` is the path whose **free space** to report — pass the same volume as your `--to` destination; disk busy% and read/write rates already cover all disks regardless. It prints a line to the console each interval and appends the full metrics to the CSV. Works on Windows and Linux; stop with Ctrl-C.
+Pass `--to-destination` the **same path you give the download `--to` flag** (e.g. `"D:\Backups"` on Windows); its volume's free space is reported. `--out` is a directory; the script writes one timestamped `usage-<start>.csv` per run into it (`.agents/playground` is the ignored scratch folder). disk busy% and read/write rates already cover all disks regardless. It prints a line to the console each interval and appends the full metrics to the CSV. Works on Windows and Linux; stop with Ctrl-C.
 
 ## Legacy scripts
 

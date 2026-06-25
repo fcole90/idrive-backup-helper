@@ -22,7 +22,8 @@ System-wide:
   blocks and the desktop/app goes "not responding" even with RAM free. Staging on
   a different volume than the destination makes every file a full copy, which is a
   prime cause.
-- disk free space for the watched volumes (--disk, default: the profile volume).
+- disk free space for the destination volume (--to-destination, default: the
+  profile volume).
 - GPU memory/util if nvidia-smi is present (otherwise blank; for non-NVIDIA
   Windows use `typeperf "\\GPU Process Memory(*)\\Dedicated Usage"`).
 
@@ -206,13 +207,8 @@ def _system_mem() -> SystemMem:
 def _disk_free_gb(paths: list[Path]) -> float | None:
     free_values: list[float] = []
     for path in paths:
-        target = str(path)
-        # A bare Windows drive letter ("E:") is drive-relative; disk_usage wants a
-        # real path, so normalize it to the drive root ("E:\\").
-        if re.fullmatch(r"[A-Za-z]:", target):
-            target += "\\"
         try:
-            free_values.append(psutil.disk_usage(target).free / _GB)
+            free_values.append(psutil.disk_usage(str(path)).free / _GB)
         except OSError:
             continue
     return min(free_values) if free_values else None
@@ -369,14 +365,13 @@ def main() -> int:
         help="Regex matched against process cmdlines to find the download process",
     )
     parser.add_argument(
-        "--disk",
+        "--to-destination",
         type=Path,
         action="append",
         default=None,
-        help="Path on the volume to report free space for; repeatable. Pass your "
-        "--to destination path (a drive letter like D: also works on Windows), "
-        "not just a name. Default: the profile dir volume. Note: disk busy% and "
-        "read/write rates already cover all disks regardless of this.",
+        help="The same path you pass to the download --to flag; its volume's free "
+        "space is reported. Repeatable. Default: the profile dir volume. Disk "
+        "busy% and read/write rates cover all disks regardless of this.",
     )
     parser.add_argument(
         "--once", action="store_true", help="Take a single sample and exit"
@@ -386,7 +381,7 @@ def main() -> int:
     profile_dir: Path = args.profile_dir or browser_profile_dir(find_repo_root())
     profile_marker = str(profile_dir)
     python_pattern = re.compile(args.python_match)
-    watch_paths: list[Path] = args.disk or [profile_dir]
+    watch_paths: list[Path] = args.to_destination or [profile_dir]
 
     out_dir: Path | None = args.out
     out_path: Path | None = None
