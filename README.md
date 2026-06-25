@@ -115,13 +115,13 @@ uv run poe typecheck      # Run Pyright strict mode
 
 ## Monitoring resource usage
 
-For long-running downloads, watch the memory, handles, and commit/swap of the download process and the browser it drives:
+For long-running downloads, watch the memory, disk I/O, and GPU usage of the download process and the browser it drives:
 
 ```sh
-uv run python scripts/monitor-resource-usage.py --interval 30 --out usage.csv
+uv run python scripts/monitor-resource-usage.py --interval 30 --out usage.csv --disk "<your --to destination>"
 ```
 
-It prints a line to the console each interval and appends the full metrics to the CSV. Works on Windows and Linux; stop with Ctrl-C.
+It prints a line to the console each interval and appends the full metrics to the CSV. Pass your `--to` destination via `--disk` so disk busy%/free space are tracked for the right volume. Works on Windows and Linux; stop with Ctrl-C.
 
 ## Legacy scripts
 

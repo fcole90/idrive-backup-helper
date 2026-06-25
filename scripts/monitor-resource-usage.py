@@ -2,37 +2,37 @@
 
 Run this alongside a real download session to attribute long-session resource
 growth to a layer (our Python process vs the Chromium browser it drives) and to
-test the hypotheses behind a system going sluggish / another app crashing while
-physical RAM is only moderately used. It uses psutil and only *reads* process and
-system counters, so it does not connect to the browser or disturb the download.
+diagnose a system going sluggish / a window "not responding" while CPU and RAM
+are only moderately used. It uses psutil (+ optional nvidia-smi) and only *reads*
+counters, so it does not connect to the browser or disturb the download.
 
     uv run python scripts/monitor-resource-usage.py --interval 30 --out usage.csv
 
-For each group (python download process, Chromium process tree) it reports:
-- rss: resident (physical) memory.
-- uss: unique set size = memory private to the process (freed if it died); the
-  best per-process "real footprint" and the analog of Windows Private Bytes.
-- vms: virtual memory size (address space committed/reserved).
-- handles: OS handles (Windows) or open file descriptors (Unix) — a leak here
-  can exhaust system limits while RAM stays low.
+Per group (python download process, Chromium process tree):
+- rss / uss / vms: resident, private (Windows Private Bytes analog), and virtual.
+- handles: OS handles (Windows) or fds (Unix); a leak exhausts limits at low RAM.
 - threads.
+- read/write MB/s: process disk I/O rate (best-effort; resets when a renderer
+  recycles, shown blank that tick).
 
-System-wide it reports physical RAM %, swap/page-file usage, and an approximate
-**commit charge** (used physical + used page file vs their totals). When physical
-RAM looks fine but other apps crash, commit charge or page-file pressure is the
-usual culprit — watch commit% and swap%, not just RAM%.
+System-wide:
+- physical RAM %, swap/page-file usage, approximate commit charge.
+- **disk read/write MB/s and disk busy%** (busiest device). Disk busy% near 100
+  while CPU is low is the signature of I/O saturation: every process doing I/O
+  blocks and the desktop/app goes "not responding" even with RAM free. Staging on
+  a different volume than the destination makes every file a full copy, which is a
+  prime cause.
+- disk free space for the watched volumes (--disk, default: the profile volume).
+- GPU memory/util if nvidia-smi is present (otherwise blank; for non-NVIDIA
+  Windows use `typeperf "\\GPU Process Memory(*)\\Dedicated Usage"`).
 
-Peaks (high-water marks) are tracked across the run and printed on exit, to catch
-sudden spikes a coarse interval would otherwise miss; use a small --interval
-during a suspect window.
-
-Note: this does NOT capture GPU/VRAM or Windows GDI/USER objects. If commit,
-handles, and RSS/USS all look flat but the system still degrades, suspect GPU
-memory next (nvidia-smi / Windows "GPU Process Memory" perf counter).
+Peaks are tracked across the run and printed on exit to catch spikes a coarse
+interval would miss; use a small --interval during a suspect window.
 """
 
 import argparse
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -45,22 +45,25 @@ from idrive_backup_helper.filesystem.paths import browser_profile_dir, find_repo
 _DEFAULT_PYTHON_MATCH = r"download-folder|retry-manifest"
 _SELF_MARKER = "monitor-resource-usage"
 _MB = 1024 * 1024
+_GB = 1024 * 1024 * 1024
+_PROC_GONE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 
 @dataclass(frozen=True)
-class GroupMem:
+class GroupSample:
     proc_count: int
     rss_mb: float
     uss_mb: float | None
     vms_mb: float
     handles: int | None
     threads: int
+    read_bytes: int | None
+    write_bytes: int | None
 
 
 @dataclass(frozen=True)
 class SystemMem:
     phys_percent: float
-    phys_used_mb: float
     swap_used_mb: float
     swap_percent: float
     commit_used_mb: float
@@ -68,10 +71,25 @@ class SystemMem:
     commit_percent: float
 
 
+@dataclass(frozen=True)
+class DiskSample:
+    read_bytes: int
+    write_bytes: int
+    busy_by_device: dict[str, float]  # cumulative busy_time ms per device
+    free_gb: float | None
+
+
+@dataclass(frozen=True)
+class GpuStats:
+    mem_used_mb: float
+    mem_total_mb: float
+    util_percent: float
+
+
 def _cmdline(proc: psutil.Process) -> str:
     try:
         return " ".join(proc.cmdline())
-    except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+    except _PROC_GONE:
         return ""
 
 
@@ -109,24 +127,24 @@ def _proc_handles(proc: psutil.Process) -> int | None:
         return None
     try:
         return int(getter())
-    except psutil.NoSuchProcess, psutil.AccessDenied:
+    except _PROC_GONE:
         return None
 
 
-def _group_mem(procs: list[psutil.Process]) -> GroupMem:
+def _group_sample(procs: list[psutil.Process]) -> GroupSample:
     count = 0
-    rss = 0
-    vms = 0
-    uss = 0
+    rss = vms = uss = 0
     uss_available = False
     handles = 0
     handles_available = False
     threads = 0
+    read_bytes = write_bytes = 0
+    io_available = False
 
     for proc in procs:
         try:
             mem = proc.memory_info()
-        except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+        except _PROC_GONE:
             continue
         count += 1
         rss += mem.rss
@@ -135,7 +153,7 @@ def _group_mem(procs: list[psutil.Process]) -> GroupMem:
         try:
             uss += proc.memory_full_info().uss
             uss_available = True
-        except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+        except _PROC_GONE:
             pass
 
         proc_handles = _proc_handles(proc)
@@ -145,16 +163,26 @@ def _group_mem(procs: list[psutil.Process]) -> GroupMem:
 
         try:
             threads += proc.num_threads()
-        except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+        except _PROC_GONE:
             pass
 
-    return GroupMem(
+        try:
+            io = proc.io_counters()
+            read_bytes += io.read_bytes
+            write_bytes += io.write_bytes
+            io_available = True
+        except (NotImplementedError, *_PROC_GONE):
+            pass
+
+    return GroupSample(
         proc_count=count,
         rss_mb=rss / _MB,
         uss_mb=(uss / _MB) if uss_available else None,
         vms_mb=vms / _MB,
         handles=handles if handles_available else None,
         threads=threads,
+        read_bytes=read_bytes if io_available else None,
+        write_bytes=write_bytes if io_available else None,
     )
 
 
@@ -162,14 +190,11 @@ def _system_mem() -> SystemMem:
     virtual = psutil.virtual_memory()
     swap = psutil.swap_memory()
     # Approximate commit charge: used physical + used page file vs their totals.
-    # This is the constraint that fails allocations (and crashes other apps) when
-    # physical RAM still looks fine.
     commit_used = virtual.used + swap.used
     commit_limit = virtual.total + swap.total
     commit_percent = (commit_used / commit_limit * 100) if commit_limit else 0.0
     return SystemMem(
         phys_percent=virtual.percent,
-        phys_used_mb=virtual.used / _MB,
         swap_used_mb=swap.used / _MB,
         swap_percent=swap.percent,
         commit_used_mb=commit_used / _MB,
@@ -178,11 +203,100 @@ def _system_mem() -> SystemMem:
     )
 
 
+def _disk_free_gb(paths: list[Path]) -> float | None:
+    free_values: list[float] = []
+    for path in paths:
+        try:
+            free_values.append(psutil.disk_usage(str(path)).free / _GB)
+        except OSError:
+            continue
+    return min(free_values) if free_values else None
+
+
+def _disk_sample(watch_paths: list[Path]) -> DiskSample:
+    read_bytes = write_bytes = 0
+    busy_by_device: dict[str, float] = {}
+    # disk_io_counters can return None on systems with no disks; fall back to {}.
+    perdisk = psutil.disk_io_counters(perdisk=True) or {}
+    for device, counters in perdisk.items():
+        read_bytes += counters.read_bytes
+        write_bytes += counters.write_bytes
+        busy_by_device[device] = float(getattr(counters, "busy_time", 0) or 0)
+    return DiskSample(
+        read_bytes=read_bytes,
+        write_bytes=write_bytes,
+        busy_by_device=busy_by_device,
+        free_gb=_disk_free_gb(watch_paths),
+    )
+
+
+def _gpu_stats() -> GpuStats | None:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.total,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+    except OSError, subprocess.SubprocessError:
+        return None
+
+    used = total = util = 0.0
+    found = False
+    for line in result.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            used += float(parts[0])
+            total += float(parts[1])
+            util = max(util, float(parts[2]))
+            found = True
+        except ValueError:
+            continue
+    return (
+        GpuStats(mem_used_mb=used, mem_total_mb=total, util_percent=util)
+        if found
+        else None
+    )
+
+
+def _rate_mbps(
+    curr: int | None, prev: int | None, elapsed: float | None
+) -> float | None:
+    if curr is None or prev is None or elapsed is None or elapsed <= 0 or curr < prev:
+        return None
+    return (curr - prev) / _MB / elapsed
+
+
+def _busy_percent(
+    curr: dict[str, float], prev: dict[str, float], elapsed: float | None
+) -> tuple[float | None, str]:
+    if not curr or elapsed is None or elapsed <= 0:
+        return None, ""
+    best_pct = -1.0
+    best_device = ""
+    for device, busy_ms in curr.items():
+        prev_ms = prev.get(device)
+        if prev_ms is None or busy_ms < prev_ms:
+            continue
+        pct = (busy_ms - prev_ms) / (elapsed * 1000.0) * 100.0
+        if pct > best_pct:
+            best_pct = pct
+            best_device = device
+    return (best_pct, best_device) if best_pct >= 0 else (None, "")
+
+
 def _fmt(value: float | None) -> str:
     return f"{value:.1f}" if value is not None else ""
 
 
-def _fmt_or_na(value: float | None) -> str:
+def _na(value: float | None) -> str:
     return f"{value:.1f}" if value is not None else "n/a"
 
 
@@ -198,27 +312,31 @@ _CSV_HEADER = [
     "py_vms_mb",
     "py_handles",
     "py_threads",
+    "py_read_mbps",
+    "py_write_mbps",
     "chrome_procs",
     "chrome_rss_mb",
     "chrome_uss_mb",
     "chrome_vms_mb",
     "chrome_handles",
     "chrome_threads",
+    "chrome_read_mbps",
+    "chrome_write_mbps",
     "phys_percent",
     "swap_used_mb",
     "swap_percent",
     "commit_used_mb",
     "commit_limit_mb",
     "commit_percent",
+    "disk_read_mbps",
+    "disk_write_mbps",
+    "disk_busy_pct",
+    "disk_busy_dev",
+    "disk_free_gb",
+    "gpu_mem_used_mb",
+    "gpu_mem_total_mb",
+    "gpu_util_pct",
 ]
-
-
-def _max_opt(current: float | None, candidate: float | None) -> float | None:
-    if candidate is None:
-        return current
-    if current is None:
-        return candidate
-    return max(current, candidate)
 
 
 def main() -> int:
@@ -245,6 +363,14 @@ def main() -> int:
         help="Regex matched against process cmdlines to find the download process",
     )
     parser.add_argument(
+        "--disk",
+        type=Path,
+        action="append",
+        default=None,
+        help="Volume(s) to report free space for; repeatable. Pass your --to "
+        "destination here. Default: the profile dir volume.",
+    )
+    parser.add_argument(
         "--once", action="store_true", help="Take a single sample and exit"
     )
     args = parser.parse_args()
@@ -252,47 +378,81 @@ def main() -> int:
     profile_dir: Path = args.profile_dir or browser_profile_dir(find_repo_root())
     profile_marker = str(profile_dir)
     python_pattern = re.compile(args.python_match)
+    watch_paths: list[Path] = args.disk or [profile_dir]
 
     out_path: Path | None = args.out
     if out_path is not None and not out_path.exists():
         out_path.write_text(_csv_row(_CSV_HEADER), encoding="utf-8")
 
+    gpu_enabled = _gpu_stats() is not None
+
     print(f"Monitoring Chromium tree under: {profile_marker}")
     print(f"Python match: /{args.python_match}/")
+    print(f"Disk free watched: {', '.join(str(p) for p in watch_paths)}")
+    print(
+        f"GPU sampling: {'on (nvidia-smi)' if gpu_enabled else 'off (nvidia-smi not found)'}"
+    )
     print(f"Interval: {args.interval}s" + ("  (single sample)" if args.once else ""))
     print()
 
-    peak_chrome_uss: float | None = None
-    peak_chrome_vms: float | None = 0.0
-    peak_commit_percent = 0.0
-    peak_swap_percent = 0.0
+    prev_mono: float | None = None
+    prev_py_write: int | None = None
+    prev_chrome_write: int | None = None
+    prev_chrome_read: int | None = None
+    prev_py_read: int | None = None
+    prev_disk_read: int | None = None
+    prev_disk_write: int | None = None
+    prev_disk_busy: dict[str, float] = {}
+
+    peak_disk_busy = 0.0
+    peak_disk_write = 0.0
+    peak_chrome_uss = 0.0
+    peak_commit = 0.0
 
     try:
         while True:
             timestamp = datetime.now().isoformat(timespec="seconds")
-            python_mem, chrome_mem = _matching_processes(profile_marker, python_pattern)
-            python_group = _group_mem(python_mem)
-            chrome_group = _group_mem(chrome_mem)
-            system = _system_mem()
+            now_mono = time.monotonic()
+            elapsed = (now_mono - prev_mono) if prev_mono is not None else None
 
-            peak_chrome_uss = _max_opt(peak_chrome_uss, chrome_group.uss_mb)
-            peak_chrome_vms = _max_opt(peak_chrome_vms, chrome_group.vms_mb)
-            peak_commit_percent = max(peak_commit_percent, system.commit_percent)
-            peak_swap_percent = max(peak_swap_percent, system.swap_percent)
+            python_grp, chrome_grp = _matching_processes(profile_marker, python_pattern)
+            python_sample = _group_sample(python_grp)
+            chrome_sample = _group_sample(chrome_grp)
+            system = _system_mem()
+            disk = _disk_sample(watch_paths)
+            gpu = _gpu_stats() if gpu_enabled else None
+
+            py_read = _rate_mbps(python_sample.read_bytes, prev_py_read, elapsed)
+            py_write = _rate_mbps(python_sample.write_bytes, prev_py_write, elapsed)
+            chrome_read = _rate_mbps(
+                chrome_sample.read_bytes, prev_chrome_read, elapsed
+            )
+            chrome_write = _rate_mbps(
+                chrome_sample.write_bytes, prev_chrome_write, elapsed
+            )
+            disk_read = _rate_mbps(disk.read_bytes, prev_disk_read, elapsed)
+            disk_write = _rate_mbps(disk.write_bytes, prev_disk_write, elapsed)
+            disk_busy, busy_dev = _busy_percent(
+                disk.busy_by_device, prev_disk_busy, elapsed
+            )
+
+            peak_disk_busy = max(peak_disk_busy, disk_busy or 0.0)
+            peak_disk_write = max(peak_disk_write, disk_write or 0.0)
+            peak_chrome_uss = max(peak_chrome_uss, chrome_sample.uss_mb or 0.0)
+            peak_commit = max(peak_commit, system.commit_percent)
 
             print(
                 f"{timestamp}  "
-                f"py: {python_group.proc_count}p "
-                f"uss={_fmt_or_na(python_group.uss_mb)}MB "
-                f"rss={_fmt(python_group.rss_mb)}MB  |  "
-                f"chrome: {chrome_group.proc_count}p "
-                f"uss={_fmt_or_na(chrome_group.uss_mb)}MB "
-                f"rss={_fmt(chrome_group.rss_mb)}MB "
-                f"vms={_fmt(chrome_group.vms_mb)}MB "
-                f"handles={chrome_group.handles if chrome_group.handles is not None else 'n/a'}  |  "
-                f"sys: ram={system.phys_percent:.0f}% "
-                f"commit={system.commit_percent:.0f}% "
-                f"swap={system.swap_percent:.0f}%",
+                f"py: {python_sample.proc_count}p uss={_na(python_sample.uss_mb)}MB  |  "
+                f"chrome: {chrome_sample.proc_count}p "
+                f"uss={_na(chrome_sample.uss_mb)}MB vms={_fmt(chrome_sample.vms_mb)}MB "
+                f"wr={_na(chrome_write)}MB/s  |  "
+                f"sys: ram={system.phys_percent:.0f}% commit={system.commit_percent:.0f}%  |  "
+                f"disk: rd={_na(disk_read)} wr={_na(disk_write)}MB/s "
+                f"busy={_na(disk_busy)}%{f'({busy_dev})' if busy_dev else ''} "
+                f"free={_na(disk.free_gb)}GB  |  "
+                f"gpu: mem={_na(gpu.mem_used_mb) if gpu else 'n/a'}MB "
+                f"util={_na(gpu.util_percent) if gpu else 'n/a'}%",
                 flush=True,
             )
 
@@ -302,27 +462,48 @@ def main() -> int:
                         _csv_row(
                             [
                                 timestamp,
-                                str(python_group.proc_count),
-                                _fmt(python_group.rss_mb),
-                                _fmt(python_group.uss_mb),
-                                _fmt(python_group.vms_mb),
-                                str(python_group.handles or ""),
-                                str(python_group.threads),
-                                str(chrome_group.proc_count),
-                                _fmt(chrome_group.rss_mb),
-                                _fmt(chrome_group.uss_mb),
-                                _fmt(chrome_group.vms_mb),
-                                str(chrome_group.handles or ""),
-                                str(chrome_group.threads),
+                                str(python_sample.proc_count),
+                                _fmt(python_sample.rss_mb),
+                                _fmt(python_sample.uss_mb),
+                                _fmt(python_sample.vms_mb),
+                                str(python_sample.handles or ""),
+                                str(python_sample.threads),
+                                _fmt(py_read),
+                                _fmt(py_write),
+                                str(chrome_sample.proc_count),
+                                _fmt(chrome_sample.rss_mb),
+                                _fmt(chrome_sample.uss_mb),
+                                _fmt(chrome_sample.vms_mb),
+                                str(chrome_sample.handles or ""),
+                                str(chrome_sample.threads),
+                                _fmt(chrome_read),
+                                _fmt(chrome_write),
                                 _fmt(system.phys_percent),
                                 _fmt(system.swap_used_mb),
                                 _fmt(system.swap_percent),
                                 _fmt(system.commit_used_mb),
                                 _fmt(system.commit_limit_mb),
                                 _fmt(system.commit_percent),
+                                _fmt(disk_read),
+                                _fmt(disk_write),
+                                _fmt(disk_busy),
+                                busy_dev,
+                                _fmt(disk.free_gb),
+                                _fmt(gpu.mem_used_mb) if gpu else "",
+                                _fmt(gpu.mem_total_mb) if gpu else "",
+                                _fmt(gpu.util_percent) if gpu else "",
                             ]
                         )
                     )
+
+            prev_mono = now_mono
+            prev_py_read = python_sample.read_bytes
+            prev_py_write = python_sample.write_bytes
+            prev_chrome_read = chrome_sample.read_bytes
+            prev_chrome_write = chrome_sample.write_bytes
+            prev_disk_read = disk.read_bytes
+            prev_disk_write = disk.write_bytes
+            prev_disk_busy = disk.busy_by_device
 
             if args.once:
                 break
@@ -332,9 +513,8 @@ def main() -> int:
 
     print()
     print(
-        "Peaks  chrome uss="
-        f"{_fmt_or_na(peak_chrome_uss)}MB  chrome vms={_fmt(peak_chrome_vms)}MB  "
-        f"commit={peak_commit_percent:.0f}%  swap={peak_swap_percent:.0f}%"
+        f"Peaks  disk busy={peak_disk_busy:.0f}%  disk write={peak_disk_write:.1f}MB/s  "
+        f"chrome uss={peak_chrome_uss:.1f}MB  commit={peak_commit:.0f}%"
     )
     return 0
 
