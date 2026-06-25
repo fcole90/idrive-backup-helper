@@ -6,7 +6,7 @@ diagnose a system going sluggish / a window "not responding" while CPU and RAM
 are only moderately used. It uses psutil (+ optional nvidia-smi) and only *reads*
 counters, so it does not connect to the browser or disturb the download.
 
-    uv run python scripts/monitor-resource-usage.py --interval 30 --out usage.csv
+    uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/playground
 
 Per group (python download process, Chromium process tree):
 - rss / uss / vms: resident, private (Windows Private Bytes analog), and virtual.
@@ -348,7 +348,8 @@ def main() -> int:
         "--out",
         type=Path,
         default=None,
-        help="CSV file to append samples to (created with a header if missing)",
+        help="Directory to write a timestamped usage CSV into (created if "
+        "missing). One file per run, named usage-<start-timestamp>.csv.",
     )
     parser.add_argument(
         "--profile-dir",
@@ -380,14 +381,20 @@ def main() -> int:
     python_pattern = re.compile(args.python_match)
     watch_paths: list[Path] = args.disk or [profile_dir]
 
-    out_path: Path | None = args.out
-    if out_path is not None and not out_path.exists():
+    out_dir: Path | None = args.out
+    out_path: Path | None = None
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        start_stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        out_path = out_dir / f"usage-{start_stamp}.csv"
         out_path.write_text(_csv_row(_CSV_HEADER), encoding="utf-8")
 
     gpu_enabled = _gpu_stats() is not None
 
     print(f"Monitoring Chromium tree under: {profile_marker}")
     print(f"Python match: /{args.python_match}/")
+    if out_path is not None:
+        print(f"Writing CSV: {out_path}")
     print(f"Disk free watched: {', '.join(str(p) for p in watch_paths)}")
     print(
         f"GPU sampling: {'on (nvidia-smi)' if gpu_enabled else 'off (nvidia-smi not found)'}"
