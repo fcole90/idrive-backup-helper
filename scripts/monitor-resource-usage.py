@@ -320,17 +320,18 @@ def _gpu_stats() -> GpuStats | None:
 
 def _disk_latency() -> DiskLatency | None:
     # Windows only. psutil cannot read disk utilization/latency on Windows, so use
-    # typeperf with locale-independent PerfLib counter indexes (names are localized
-    # but indexes are not): 234=PhysicalDisk, 200=% Disk Time, 198=Current Disk
-    # Queue Length, 208=Avg. Disk sec/Transfer. -sc 2 because the first sample of a
-    # rate counter (% Disk Time) is unreliable; we parse the last data row.
+    # typeperf. Counter names are English (typeperf rejects numeric indexes here);
+    # on non-English Windows these names would need to be localized. -sc 2 because
+    # the first sample of a rate counter (% Disk Time) is unreliable; parse the last
+    # data row. % Disk Time can exceed 100 with multiple disks / queued I/O, which
+    # is itself a saturation signal, so it is reported unclamped.
     try:
         result = subprocess.run(
             [
                 "typeperf",
-                r"\234(_Total)\200",
-                r"\234(_Total)\198",
-                r"\234(_Total)\208",
+                r"\PhysicalDisk(_Total)\% Disk Time",
+                r"\PhysicalDisk(_Total)\Current Disk Queue Length",
+                r"\PhysicalDisk(_Total)\Avg. Disk sec/Transfer",
                 "-sc",
                 "2",
             ],
