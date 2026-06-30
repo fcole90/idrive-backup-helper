@@ -13,21 +13,21 @@ def test_transfer_remote_file_to_destination_builds_downloaded_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    downloads_dir = tmp_path / "downloads"
+    staging_dir = tmp_path / "staging"
     destination_dir = tmp_path / "dest"
-    downloads_dir.mkdir(parents=True)
+    staging_dir.mkdir(parents=True)
     destination_dir.mkdir(parents=True)
 
-    staged_path = downloads_dir / "example.txt"
+    staged_path = staging_dir / "example.txt"
     final_path = destination_dir / "example.txt"
 
     def fake_download_one_file(
         page: object,
         remote_file: RemoteFile,
-        staging_dir: Path,
+        staging_dir_arg: Path,
         cooldown_ms: int,
     ) -> Path:
-        assert staging_dir == downloads_dir
+        assert staging_dir_arg == staging_dir
         assert cooldown_ms == 1500
         assert remote_file.file_name == "example.txt"
         return staged_path
@@ -63,7 +63,7 @@ def test_transfer_remote_file_to_destination_builds_downloaded_file(
             server_size_text=None,
             server_modified_text=None,
         ),
-        downloads_dir=downloads_dir,
+        staging_dir=staging_dir,
         destination_dir=destination_dir,
         replace_existing=True,
         cooldown_ms=1500,

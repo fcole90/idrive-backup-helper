@@ -96,7 +96,7 @@ def test_browser_engine_attaches_to_cdp_without_closing_browser_context(
 
     config = BrowserConfig(
         profile_dir=tmp_path / "profile",
-        downloads_dir=tmp_path / "downloads",
+        staging_dir=tmp_path / "downloads",
         headless=False,
         timeout_ms=1234,
         browser_debug_url="http://127.0.0.1:9222",
@@ -128,7 +128,7 @@ def test_browser_engine_logs_detached_browser_lifecycle(
 
     config = BrowserConfig(
         profile_dir=tmp_path / "profile",
-        downloads_dir=tmp_path / "downloads",
+        staging_dir=tmp_path / "downloads",
         headless=False,
         timeout_ms=1234,
         browser_debug_url="http://127.0.0.1:9222",
@@ -165,7 +165,7 @@ def test_browser_engine_reuses_current_page_without_opening_new_tab(
 
     config = BrowserConfig(
         profile_dir=tmp_path / "profile",
-        downloads_dir=tmp_path / "downloads",
+        staging_dir=tmp_path / "downloads",
         headless=False,
         timeout_ms=1234,
         browser_debug_url="http://127.0.0.1:9222",

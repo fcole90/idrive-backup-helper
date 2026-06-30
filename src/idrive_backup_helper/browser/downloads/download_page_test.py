@@ -3,7 +3,11 @@ from typing import TypedDict
 from typing import cast
 
 import pytest
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    Error as PlaywrightError,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from idrive_backup_helper.browser.downloads.download_models import (
     RemoteEntries,
@@ -532,6 +536,64 @@ def test_download_one_file_fails_fast_when_trigger_reports_missing_row(
     }
 
 
+def test_download_one_file_returns_artifact_path_without_copying(
+    tmp_path: Path,
+) -> None:
+    # Owned local browser: the artifact already sits on the staging volume, so
+    # download_one_file hands back its path and never streams a copy.
+    artifact_path = tmp_path / "staging" / "guid-artifact"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(b"payload")
+    download = FakeDownload(artifact_path=artifact_path)
+    page = FakeDownloadPage(download)
+
+    staged_path = download_one_file(
+        cast(Page, page),
+        _remote_file("example.mp3"),
+        tmp_path / "staging",
+        cooldown_ms=1500,
+    )
+
+    assert staged_path == artifact_path
+    assert download.save_as_target is None
+
+
+def test_download_one_file_streams_copy_to_staging_when_path_unavailable(
+    tmp_path: Path,
+) -> None:
+    # CDP-attached browser: download.path() is unavailable, so the file is
+    # streamed onto the staging volume under its suggested name.
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    download = FakeDownload(artifact_path=None, suggested_filename="example.mp3")
+    page = FakeDownloadPage(download)
+
+    staged_path = download_one_file(
+        cast(Page, page),
+        _remote_file("example.mp3"),
+        staging_dir,
+        cooldown_ms=1500,
+    )
+
+    assert staged_path == staging_dir / "example.mp3"
+    assert download.save_as_target == str(staging_dir / "example.mp3")
+
+
+def test_download_one_file_raises_when_download_reports_failure(
+    tmp_path: Path,
+) -> None:
+    download = FakeDownload(artifact_path=None, failure="user canceled")
+    page = FakeDownloadPage(download)
+
+    with pytest.raises(RuntimeError, match="Download failed"):
+        download_one_file(
+            cast(Page, page),
+            _remote_file("example.mp3"),
+            tmp_path,
+            cooldown_ms=1500,
+        )
+
+
 def _fake_load_folder_entries_cache(
     downloads_dir: Path,
     target_url: str,
@@ -646,6 +708,67 @@ class FakeDownloadTriggerFailureWaiter:
     @property
     def value(self) -> object:
         raise AssertionError("download value should not be read after trigger failure")
+
+
+class FakeDownload:
+    def __init__(
+        self,
+        *,
+        artifact_path: Path | None,
+        suggested_filename: str = "example.mp3",
+        failure: str | None = None,
+    ) -> None:
+        self._artifact_path = artifact_path
+        self.suggested_filename = suggested_filename
+        self._failure = failure
+        self.save_as_target: str | None = None
+
+    def failure(self) -> str | None:
+        return self._failure
+
+    def path(self) -> Path:
+        if self._artifact_path is None:
+            raise PlaywrightError(
+                "Path is not available when using browser_type.connect()."
+            )
+        return self._artifact_path
+
+    def save_as(self, target: str) -> None:
+        self.save_as_target = target
+
+
+class FakeDownloadWaiter:
+    def __init__(self, download: FakeDownload) -> None:
+        self._download = download
+
+    def __enter__(self) -> "FakeDownloadWaiter":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        return None
+
+    @property
+    def value(self) -> FakeDownload:
+        return self._download
+
+
+class FakeDownloadPage:
+    def __init__(self, download: FakeDownload) -> None:
+        self._download = download
+        self.evaluate_payload: object | None = None
+
+    def expect_download(self, *, timeout: float) -> FakeDownloadWaiter:
+        assert timeout == DOWNLOAD_START_TIMEOUT_MS
+        return FakeDownloadWaiter(self._download)
+
+    def evaluate(self, expression: str, payload: object) -> dict[str, object]:
+        self.evaluate_payload = payload
+        return {"ok": True}
 
 
 def _remote_file(file_name: str) -> RemoteFile:

@@ -76,7 +76,7 @@ def open_authenticated_browser(
 ) -> None:
     config = BrowserConfig(
         profile_dir=profile_dir,
-        downloads_dir=downloads_dir,
+        staging_dir=downloads_dir,
         headless=False,
         timeout_ms=120_000,
         browser_debug_url=browser_debug_url,

@@ -116,7 +116,7 @@ class DetachedBrowserLaunch:
 @dataclass(frozen=True)
 class BrowserConfig:
     profile_dir: Path
-    downloads_dir: Path
+    staging_dir: Path
     headless: bool
     timeout_ms: int
     browser_debug_url: str | None = None
@@ -132,7 +132,7 @@ class BrowserEngine:
 
     def __enter__(self) -> "BrowserEngine":
         self._config.profile_dir.mkdir(parents=True, exist_ok=True)
-        self._config.downloads_dir.mkdir(parents=True, exist_ok=True)
+        self._config.staging_dir.mkdir(parents=True, exist_ok=True)
 
         self._playwright = self._playwright_context.__enter__()
         if self._config.browser_debug_url is None:
@@ -142,14 +142,14 @@ class BrowserEngine:
             _log(
                 "Launching owned persistent browser context "
                 f"(headless={self._config.headless}, profile={self._config.profile_dir}, "
-                f"downloads={self._config.downloads_dir})"
+                f"downloads={self._config.staging_dir})"
             )
             self._browser_context = self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self._config.profile_dir),
                 executable_path=str(chromium_executable),
                 headless=self._config.headless,
                 accept_downloads=True,
-                downloads_path=str(self._config.downloads_dir),
+                downloads_path=str(self._config.staging_dir),
             )
         else:
             self._browser = self._connect_or_launch_browser(self._playwright)

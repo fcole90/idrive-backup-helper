@@ -29,6 +29,8 @@ from idrive_backup_helper.browser.downloads.download_transfer import (
 )
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 from idrive_backup_helper.filesystem.listing import DirectoryListingCache
+from idrive_backup_helper.filesystem.moves import clear_staging_dir
+from idrive_backup_helper.filesystem.paths import staging_dir_for_destination
 
 
 def retry_missing_files_from_manifest(
@@ -101,9 +103,15 @@ def retry_missing_files_from_manifest(
         key = (item.folder_url, item.final_path.parent)
         grouped_targets.setdefault(key, []).append(item)
 
+    staging_dir = staging_dir_for_destination(manifest.destination)
+    cleared_staging = clear_staging_dir(staging_dir)
+    if cleared_staging:
+        log_download_message(
+            f"Cleared {len(cleared_staging)} leftover staging file(s) in {staging_dir}"
+        )
     config = BrowserConfig(
         profile_dir=profile_dir,
-        downloads_dir=downloads_dir,
+        staging_dir=staging_dir,
         headless=headless,
         timeout_ms=timeout_ms,
         browser_debug_url=browser_debug_url,
@@ -187,7 +195,7 @@ def retry_missing_files_from_manifest(
                                 server_size_text=item.server_size_text,
                                 server_modified_text=item.server_modified_text,
                             ),
-                            downloads_dir=downloads_dir,
+                            staging_dir=staging_dir,
                             destination_dir=destination_dir,
                             replace_existing=overwrite_mode == "replace",
                             cooldown_ms=cooldown_ms,

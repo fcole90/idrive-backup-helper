@@ -21,3 +21,13 @@ def browser_profile_dir(repo_root: Path) -> Path:
 
 def downloads_dir(repo_root: Path) -> Path:
     return playground_dir(repo_root) / "downloads"
+
+
+STAGING_DIR_NAME = ".idrive-staging"
+
+
+def staging_dir_for_destination(destination: Path) -> Path:
+    # Downloads must be staged on the destination's own volume so finalizing a
+    # file is a same-volume rename, not a cross-device copy. A single dir at the
+    # top of the --to root covers every child folder since they share the volume.
+    return destination / STAGING_DIR_NAME

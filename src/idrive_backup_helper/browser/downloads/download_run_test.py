@@ -72,13 +72,14 @@ def test_download_current_folder_loads_cached_folder_before_first_download(
         *,
         page: object,
         remote_file: RemoteFile,
-        downloads_dir: Path,
+        staging_dir: Path,
         destination_dir: Path,
         replace_existing: bool,
         cooldown_ms: int,
     ) -> DownloadedFile:
         assert load_calls == [folder_url]
-        staged_path = downloads_dir / remote_file.file_name
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staged_path = staging_dir / remote_file.file_name
         final_path = destination_dir / remote_file.file_name
         staged_path.write_text("downloaded", encoding="utf-8")
         return DownloadedFile(
@@ -208,13 +209,13 @@ def test_download_current_folder_redownloads_when_resume_success_file_missing(
         *,
         page: object,
         remote_file: RemoteFile,
-        downloads_dir: Path,
+        staging_dir: Path,
         destination_dir: Path,
         replace_existing: bool,
         cooldown_ms: int,
     ) -> DownloadedFile:
         transferred.append(remote_file.file_name)
-        staged_path = downloads_dir / remote_file.file_name
+        staged_path = staging_dir / remote_file.file_name
         final_path = destination_dir / remote_file.file_name
         return DownloadedFile(
             file_name=remote_file.file_name,
@@ -302,12 +303,12 @@ def _fake_transfer_remote_file_to_destination(
     *,
     page: object,
     remote_file: RemoteFile,
-    downloads_dir: Path,
+    staging_dir: Path,
     destination_dir: Path,
     replace_existing: bool,
     cooldown_ms: int,
 ) -> DownloadedFile:
-    staged_path = downloads_dir / remote_file.file_name
+    staged_path = staging_dir / remote_file.file_name
     final_path = destination_dir / remote_file.file_name
     return DownloadedFile(
         file_name=remote_file.file_name,

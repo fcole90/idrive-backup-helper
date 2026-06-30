@@ -14,7 +14,7 @@ def transfer_remote_file_to_destination(
     *,
     page: Page,
     remote_file: RemoteFile,
-    downloads_dir: Path,
+    staging_dir: Path,
     destination_dir: Path,
     replace_existing: bool,
     cooldown_ms: int,
@@ -22,7 +22,7 @@ def transfer_remote_file_to_destination(
     staged_path = download_one_file(
         page,
         remote_file,
-        downloads_dir,
+        staging_dir,
         cooldown_ms,
     )
     moved_path = move_download_to_destination(

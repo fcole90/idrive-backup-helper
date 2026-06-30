@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 from playwright.sync_api import (
+    Download,
     Error as PlaywrightError,
     Page,
     TimeoutError as PlaywrightTimeoutError,
@@ -629,12 +630,32 @@ def download_one_file(
             f"Download canceled by browser/session: {remote_file.file_name} ({error})"
         ) from error
 
-    staged_path = staging_dir / download.suggested_filename
-    try:
-        download.save_as(str(staged_path))
-    except PlaywrightError as error:
-        raise RuntimeError(
-            f"Failed saving download: {remote_file.file_name} ({error})"
-        ) from error
+    failure = download.failure()
+    if failure is not None:
+        raise RuntimeError(f"Download failed: {remote_file.file_name} ({failure})")
+
+    staged_path = _stage_download_on_volume(download, staging_dir, remote_file)
     _log(f"Staged download complete: {remote_file.file_name} -> {staged_path}")
     return staged_path
+
+
+def _stage_download_on_volume(
+    download: Download, staging_dir: Path, remote_file: RemoteFile
+) -> Path:
+    # For an owned local browser, Playwright already wrote the artifact into the
+    # configured downloads_path (staging_dir, on the destination volume), so we
+    # hand back that path directly and let the caller rename it into place: one
+    # write, one antivirus scan, no copy. download.path() is unavailable over a
+    # CDP connection, so there we fall back to streaming a copy onto the staging
+    # volume; the subsequent rename to the final name is still same-volume.
+    try:
+        return Path(download.path())
+    except PlaywrightError:
+        staged_path = staging_dir / download.suggested_filename
+        try:
+            download.save_as(str(staged_path))
+        except PlaywrightError as error:
+            raise RuntimeError(
+                f"Failed saving download: {remote_file.file_name} ({error})"
+            ) from error
+        return staged_path

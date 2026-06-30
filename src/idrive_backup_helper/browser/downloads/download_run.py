@@ -35,6 +35,8 @@ from idrive_backup_helper.browser.downloads.download_transfer import (
 )
 from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 from idrive_backup_helper.filesystem.listing import existing_entry_names
+from idrive_backup_helper.filesystem.moves import clear_staging_dir
+from idrive_backup_helper.filesystem.paths import staging_dir_for_destination
 
 
 def _precheck_overwrite_conflicts(
@@ -71,9 +73,15 @@ def download_current_folder(
 ) -> DownloadFolderReport:
     overwrite_mode = cast(OverwriteMode, overwrite)
     destination = ensure_destination_dir(destination)
+    staging_dir = staging_dir_for_destination(destination)
+    cleared_staging = clear_staging_dir(staging_dir)
+    if cleared_staging:
+        log_download_message(
+            f"Cleared {len(cleared_staging)} leftover staging file(s) in {staging_dir}"
+        )
     config = BrowserConfig(
         profile_dir=profile_dir,
-        downloads_dir=downloads_dir,
+        staging_dir=staging_dir,
         headless=headless,
         timeout_ms=timeout_ms,
         browser_debug_url=browser_debug_url,
@@ -286,7 +294,7 @@ def download_current_folder(
                         downloaded_file = transfer_remote_file_to_destination(
                             page=page,
                             remote_file=remote_file,
-                            downloads_dir=downloads_dir,
+                            staging_dir=staging_dir,
                             destination_dir=folder_task.destination,
                             replace_existing=overwrite_mode == "replace",
                             cooldown_ms=cooldown_ms,
