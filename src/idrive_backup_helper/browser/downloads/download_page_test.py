@@ -697,6 +697,44 @@ def test_navigate_to_folder_with_clicks_restarts_from_home_for_different_root(
     ]
 
 
+def test_navigate_to_folder_with_clicks_climbs_then_hops_when_collapsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._load_js_asset",
+        _fake_load_js_asset,
+    )
+    # At device/DRIVE/A/B/C/D/E, but the breadcrumb only exposes the three deepest
+    # crumbs (C=4, D=5, E=6) — the shared ancestor A is collapsed. Target diverges
+    # at A vs Bx. Climb to the shallowest visible crumb (C=4); from device/DRIVE/A/B/C
+    # the breadcrumb re-renders the full leading path, so the re-plan can hop up to A.
+    page = FakeClimbPage(
+        url="https://www.idrive.com/idrive/home/device/DRIVE/A/B/C/D/E",
+        breadcrumb_address_indexes=[4, 5, 6],
+        on_breadcrumb_click={
+            4: (
+                "https://www.idrive.com/idrive/home/device/DRIVE/A/B/C",
+                [0, 1, 2, 3, 4],
+            ),
+        },
+    )
+
+    navigate_to_folder_with_clicks(
+        cast(Page, page),
+        "https://www.idrive.com/idrive/home/device/DRIVE/A/Bx/Y",
+        60_000,
+    )
+
+    # One climb (to C=4) then one hop (to A=2), no home restart, then descend.
+    assert page.navigated_urls == []
+    assert page.breadcrumb_clicks == [4, 2]
+    assert [payload["folderName"] for payload in page.evaluate_payloads] == ["Bx", "Y"]
+
+
 def test_plan_breadcrumb_navigation_descends_when_current_is_prefix() -> None:
     plan = plan_breadcrumb_navigation(
         ["device", "F"], ["device", "F", "path", "to"], [0, 1]
@@ -748,7 +786,20 @@ def test_plan_breadcrumb_navigation_hops_to_deepest_visible_when_collapsed() -> 
     )
 
 
-def test_plan_breadcrumb_navigation_goes_home_when_no_visible_common_ancestor() -> None:
+def test_plan_breadcrumb_navigation_climbs_when_shared_ancestor_is_collapsed() -> None:
+    # Diverges at index 2 (A vs Ax) but only the two deepest crumbs are clickable;
+    # the shared ancestors are hidden behind the ellipsis. Climb to the shallowest
+    # visible crumb (B, addressindex 3) rather than restarting from home.
+    current = ["device", "DRIVE", "A", "B", "C"]
+    target = ["device", "DRIVE", "Ax", "Z"]
+    plan = plan_breadcrumb_navigation(current, target, [3, 4])
+    assert plan == NavigationPlan(
+        action="breadcrumb_climb", start_index=0, hop_address_index=3
+    )
+
+
+def test_plan_breadcrumb_navigation_goes_home_when_only_leaf_crumb_visible() -> None:
+    # Nothing above the current folder is clickable, so there is nowhere to climb.
     plan = plan_breadcrumb_navigation(
         ["device", "F", "sub"], ["device", "F", "other"], [2]
     )
@@ -927,6 +978,38 @@ class FakeClickPage(FakeLoadPage):
             return list(self._breadcrumb_address_indexes)
         if expression == "fake breadcrumb script":
             self.breadcrumb_clicks.append(cast(dict[str, object], payload))
+            return {"ok": True}
+        assert expression == "fake folder script"
+        self.evaluate_payloads.append(cast(FolderClickPayload, payload))
+        return {"ok": True}
+
+
+class FakeClimbPage(FakeLoadPage):
+    """A page where clicking a breadcrumb crumb navigates up and re-renders the
+    breadcrumb, revealing crumbs that were collapsed at the deeper location."""
+
+    def __init__(
+        self,
+        url: str,
+        breadcrumb_address_indexes: list[int],
+        on_breadcrumb_click: dict[int, tuple[str, list[int]]],
+    ) -> None:
+        super().__init__(url)
+        self._visible = list(breadcrumb_address_indexes)
+        self._on_click = on_breadcrumb_click
+        self.breadcrumb_clicks: list[int] = []
+        self.evaluate_payloads: list[FolderClickPayload] = []
+
+    def evaluate(self, expression: str, payload: object = None) -> object:
+        if payload is None:
+            return list(self._visible)
+        if expression == "fake breadcrumb script":
+            address_index = cast(int, cast(dict[str, object], payload)["addressIndex"])
+            self.breadcrumb_clicks.append(address_index)
+            transition = self._on_click.get(address_index)
+            if transition is not None:
+                self.url, new_visible = transition
+                self._visible = list(new_visible)
             return {"ok": True}
         assert expression == "fake folder script"
         self.evaluate_payloads.append(cast(FolderClickPayload, payload))

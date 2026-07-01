@@ -397,7 +397,9 @@ def _ensure_idrive_click_path(target_url: str, path_parts: list[str]) -> None:
         )
 
 
-type NavigationAction = Literal["click_down", "breadcrumb_up", "go_home"]
+type NavigationAction = Literal[
+    "click_down", "breadcrumb_up", "breadcrumb_climb", "go_home"
+]
 
 
 @dataclass(frozen=True)
@@ -442,14 +444,31 @@ def plan_breadcrumb_navigation(
     # common ancestor may be collapsed on a deep path, but any visible shared
     # ancestor (the device crumb almost always survives) still avoids a home restart.
     hop_candidates = [index for index in visible_address_indexes if index <= common - 1]
-    if not hop_candidates:
+    if hop_candidates:
+        hop_index = max(hop_candidates)
+        return NavigationPlan(
+            action="breadcrumb_up",
+            start_index=hop_index + 1,
+            hop_address_index=hop_index,
+        )
+
+    # No shared ancestor is visible: every clickable crumb sits below the divergence
+    # (the shared ones are hidden behind the ellipsis). Rather than fall straight
+    # back to home, climb to the shallowest crumb still above the current folder;
+    # from that shallower spot the breadcrumb re-renders more of the leading path,
+    # and the caller re-plans — usually finding a shared ancestor after one or two
+    # short hops instead of returning all the way to root.
+    leaf_index = len(current_parts) - 1
+    climb_candidates = [
+        index for index in visible_address_indexes if index < leaf_index
+    ]
+    if not climb_candidates:
         return NavigationPlan(action="go_home", start_index=0)
 
-    hop_index = max(hop_candidates)
     return NavigationPlan(
-        action="breadcrumb_up",
-        start_index=hop_index + 1,
-        hop_address_index=hop_index,
+        action="breadcrumb_climb",
+        start_index=0,
+        hop_address_index=min(climb_candidates),
     )
 
 
@@ -493,6 +512,16 @@ def _click_breadcrumb_by_index(page: Page, address_index: int) -> None:
     _ensure_click_result(result, f"breadcrumb addressindex {address_index}")
 
 
+def _plan_navigation_reading_breadcrumb(
+    page: Page, target_parts: list[str]
+) -> NavigationPlan:
+    current_parts = _current_idrive_path_parts(page.url)
+    visible_address_indexes = _read_breadcrumb_address_indexes(page)
+    return plan_breadcrumb_navigation(
+        current_parts, target_parts, visible_address_indexes
+    )
+
+
 def navigate_to_folder_with_clicks(
     page: Page, target_url: str, timeout_ms: int
 ) -> None:
@@ -514,11 +543,28 @@ def navigate_to_folder_with_clicks(
     if is_idrive_url(target_url):
         _log(f"Resolved IDrive click path: {' / '.join(target_display_parts)}")
 
-    current_parts = _current_idrive_path_parts(page.url)
-    visible_address_indexes = _read_breadcrumb_address_indexes(page)
-    plan = plan_breadcrumb_navigation(
-        current_parts, path_parts, visible_address_indexes
-    )
+    plan = _plan_navigation_reading_breadcrumb(page, path_parts)
+    # No shared ancestor is clickable yet: climb to the shallowest visible crumb to
+    # reveal more of the leading path, then re-plan from there. Each climb strictly
+    # reduces the current depth, so this converges (bounded for safety in case the
+    # tab URL fails to follow a click).
+    climbs = 0
+    while plan.action == "breadcrumb_climb":
+        assert plan.hop_address_index is not None
+        climbs += 1
+        if climbs > len(path_parts) + 1:
+            _log("Breadcrumb climb is not converging; restarting from home")
+            plan = NavigationPlan(action="go_home", start_index=0)
+            break
+        _log(
+            "Climbing to shallowest visible breadcrumb crumb "
+            f"(addressindex {plan.hop_address_index}) to reveal a shared ancestor"
+        )
+        _click_breadcrumb_by_index(page, plan.hop_address_index)
+        page.wait_for_timeout(_human_delay_ms())
+        wait_for_folder_view_settle(page, timeout_ms)
+        plan = _plan_navigation_reading_breadcrumb(page, path_parts)
+
     start_index = plan.start_index
 
     if plan.action == "go_home":
