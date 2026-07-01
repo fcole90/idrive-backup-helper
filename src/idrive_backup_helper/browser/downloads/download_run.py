@@ -6,14 +6,13 @@ from idrive_backup_helper.browser.downloads.download_cache import (
     load_resume_success_relative_paths,
 )
 from idrive_backup_helper.browser.downloads.download_manifest import (
+    StreamingManifestWriter,
     build_manifest_path,
     ensure_destination_dir,
     relative_path_from_destination,
-    write_manifest,
 )
 from idrive_backup_helper.browser.downloads.download_models import (
     DownloadFolderReport,
-    DownloadedFile,
     FailedFile,
     FolderTask,
     ManifestFileRecord,
@@ -103,10 +102,8 @@ def download_current_folder(
         resumeFromLogs=resume_from_logs,
     )
 
-    downloaded: list[DownloadedFile] = []
-    skipped: list[SkippedFile] = []
-    failed: list[FailedFile] = []
-    discovered_files: list[ManifestFileRecord] = []
+    manifest_path = build_manifest_path(downloads_dir, started_at)
+    repo_root = downloads_dir.parents[2]
     folder_queue: list[FolderTask] = [
         FolderTask(url=url, destination=destination, expected_folder_name=None)
     ]
@@ -129,6 +126,14 @@ def download_current_folder(
                 f"{len(successful_from_logs)} previously successful file(s)"
             )
 
+    manifest_writer = StreamingManifestWriter(
+        manifest_path=manifest_path,
+        repo_root=repo_root,
+        url=url,
+        destination=destination,
+        started_at=started_at,
+        progress_log_path=progress_log_path,
+    )
     try:
         with BrowserEngine(config) as engine:
             page = engine.current_page_or_new_page()
@@ -216,7 +221,7 @@ def download_current_folder(
                     relative_path = relative_path_from_destination(
                         destination, final_path
                     )
-                    discovered_files.append(
+                    manifest_writer.record_discovered(
                         ManifestFileRecord(
                             folder_url=folder_task.url,
                             relative_path=relative_path,
@@ -236,7 +241,7 @@ def download_current_folder(
                             if relative_path in successful_from_logs
                             else "destination exists"
                         )
-                        skipped.append(
+                        manifest_writer.record_skipped(
                             SkippedFile(
                                 file_name=remote_file.file_name,
                                 reason=reason,
@@ -313,7 +318,7 @@ def download_current_folder(
                             relativePath=relative_path,
                             reason=str(error),
                         )
-                        failed.append(
+                        manifest_writer.record_failed(
                             FailedFile(
                                 file_name=remote_file.file_name,
                                 reason=str(error),
@@ -329,33 +334,30 @@ def download_current_folder(
                         stagedPath=str(downloaded_file.staged_path),
                         finalPath=str(downloaded_file.final_path),
                     )
-                    downloaded.append(downloaded_file)
+                    manifest_writer.record_downloaded(downloaded_file)
     except Exception as error:
         progress_logger.log("run_failed", reason=str(error))
+        # Leave the partial journal on disk; do not publish a final manifest.
+        manifest_writer.close()
         raise
 
     finished_at = datetime.now()
-    repo_root = downloads_dir.parents[2]
-    manifest_path = build_manifest_path(downloads_dir, started_at)
+    counts = manifest_writer.finalize(finished_at)
     report = DownloadFolderReport(
         url=url,
         destination=destination,
         started_at=started_at,
         finished_at=finished_at,
-        downloaded=downloaded,
-        skipped=skipped,
-        failed=failed,
-        discovered_files=discovered_files,
+        counts=counts,
         manifest_path=manifest_path,
         progress_log_path=progress_log_path,
     )
     progress_logger.log(
         "run_finished",
-        downloadedCount=len(downloaded),
-        skippedCount=len(skipped),
-        failedCount=len(failed),
+        downloadedCount=counts.downloaded,
+        skippedCount=counts.skipped,
+        failedCount=counts.failed,
         manifestPath=str(manifest_path),
         exitCode=report.exit_code,
     )
-    write_manifest(report, repo_root)
     return report

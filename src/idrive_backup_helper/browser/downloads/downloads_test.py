@@ -5,8 +5,8 @@ import pytest
 from idrive_backup_helper.browser.downloads.downloads import (
     RemoteEntries,
     RemoteFile,
+    DownloadCounts,
     DownloadFolderReport,
-    FailedFile,
     ProgressEventLogger,
     RemoteFolder,
     build_progress_log_path,
@@ -17,7 +17,7 @@ from idrive_backup_helper.browser.downloads.downloads import (
     build_retry_manifest_path,
     ensure_destination_dir,
     ensure_raw_file_list,
-    load_download_manifest,
+    iter_manifest_discovered_files,
     parse_remote_entries,
     parse_remote_files,
     verify_download_manifest,
@@ -89,7 +89,7 @@ def test_build_manifest_path_uses_expected_file_name() -> None:
         datetime(2026, 6, 14, 14, 30, 0),
     )
 
-    assert manifest_path.name == "download-folder-run-2026-06-14T14-30-00.json"
+    assert manifest_path.name == "download-folder-run-2026-06-14T14-30-00.ndjson"
 
 
 def test_build_retry_manifest_path_uses_expected_file_name() -> None:
@@ -98,7 +98,7 @@ def test_build_retry_manifest_path_uses_expected_file_name() -> None:
         datetime(2026, 6, 14, 14, 30, 0),
     )
 
-    assert manifest_path.name == "retry-manifest-run-2026-06-14T14-30-00.json"
+    assert manifest_path.name == "retry-manifest-run-2026-06-14T14-30-00.ndjson"
 
 
 def test_build_progress_log_path_uses_expected_file_name() -> None:
@@ -127,29 +127,25 @@ def test_download_folder_report_exit_code_tracks_failures() -> None:
         destination=Path("/tmp/out"),
         started_at=datetime(2026, 6, 14, 14, 30, 0),
         finished_at=datetime(2026, 6, 14, 14, 31, 0),
-        downloaded=[],
-        skipped=[],
-        failed=[],
-        discovered_files=[],
-        manifest_path=Path("/tmp/downloads/report.json"),
+        counts=DownloadCounts(discovered=3, downloaded=3),
+        manifest_path=Path("/tmp/downloads/report.ndjson"),
     )
     failed_report = DownloadFolderReport(
         url="https://example.com",
         destination=Path("/tmp/out"),
         started_at=datetime(2026, 6, 14, 14, 30, 0),
         finished_at=datetime(2026, 6, 14, 14, 31, 0),
-        downloaded=[],
-        skipped=[],
-        failed=[FailedFile(file_name="bad.zip", reason="Download timed out")],
-        discovered_files=[],
-        manifest_path=Path("/tmp/downloads/report.json"),
+        counts=DownloadCounts(discovered=1, failed=1),
+        manifest_path=Path("/tmp/downloads/report.ndjson"),
     )
 
     assert clean_report.exit_code == 0
     assert failed_report.exit_code == 1
 
 
-def test_load_download_manifest_rejects_legacy_manifest(tmp_path: Path) -> None:
+def test_iter_manifest_discovered_files_rejects_legacy_without_inventory(
+    tmp_path: Path,
+) -> None:
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
         '{"url":"https://example.com","destination":"/tmp/out"}\n',
@@ -157,7 +153,7 @@ def test_load_download_manifest_rejects_legacy_manifest(tmp_path: Path) -> None:
     )
 
     with pytest.raises(RuntimeError, match="discoveredFiles"):
-        load_download_manifest(manifest_path)
+        list(iter_manifest_discovered_files(manifest_path))
 
 
 def test_verify_download_manifest_reports_missing_files(tmp_path: Path) -> None:
@@ -188,7 +184,7 @@ def test_verify_download_manifest_reports_missing_files(tmp_path: Path) -> None:
 
     assert verification.expected_files == 1
     assert verification.present_files == 0
-    assert len(verification.missing_files) == 1
+    assert verification.missing_files == 1
 
 
 def test_progress_event_logger_appends_jsonl_records(tmp_path: Path) -> None:

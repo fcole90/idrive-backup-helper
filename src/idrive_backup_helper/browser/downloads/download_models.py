@@ -56,11 +56,12 @@ class ManifestFileRecord:
 
 
 @dataclass(frozen=True)
-class DownloadManifest:
+class ManifestHeader:
+    """Run-level metadata read from a manifest without materializing its records."""
+
     manifest_path: Path
     url: str
     destination: Path
-    discovered_files: list[ManifestFileRecord]
 
 
 @dataclass(frozen=True)
@@ -68,11 +69,21 @@ class ManifestVerification:
     manifest_path: Path
     expected_files: int
     present_files: int
-    missing_files: list[ManifestFileRecord]
+    missing_files: int
 
     @property
     def exit_code(self) -> int:
         return 1 if self.missing_files else 0
+
+
+@dataclass(frozen=True)
+class DownloadCounts:
+    """Per-run tallies kept in memory in place of the O(files) record lists."""
+
+    discovered: int = 0
+    downloaded: int = 0
+    skipped: int = 0
+    failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -81,16 +92,13 @@ class DownloadFolderReport:
     destination: Path
     started_at: datetime
     finished_at: datetime
-    downloaded: list[DownloadedFile]
-    skipped: list[SkippedFile]
-    failed: list[FailedFile]
-    discovered_files: list[ManifestFileRecord]
+    counts: DownloadCounts
     manifest_path: Path
     progress_log_path: Path | None = None
 
     @property
     def exit_code(self) -> int:
-        return 1 if self.failed else 0
+        return 1 if self.counts.failed else 0
 
 
 @dataclass(frozen=True)

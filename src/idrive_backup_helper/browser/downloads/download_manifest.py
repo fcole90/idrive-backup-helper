@@ -1,24 +1,37 @@
+from collections.abc import Iterator
 from datetime import datetime
 import json
+import os
 from pathlib import Path
+from types import TracebackType
 from typing import cast
 
 from idrive_backup_helper.browser.downloads.download_models import (
-    DownloadFolderReport,
-    DownloadManifest,
+    DownloadCounts,
+    DownloadedFile,
+    FailedFile,
     ManifestFileRecord,
+    ManifestHeader,
     ManifestVerification,
+    SkippedFile,
 )
+
+# ndjson manifest: line 0 is a `run` header, then one record per discovered/
+# downloaded/skipped/failed file, then a trailing `summary` line. This keeps both
+# the write and read paths O(1) in memory instead of holding one object per file
+# for the whole run. Legacy pretty-printed JSON manifests (single object with
+# `discoveredFiles`/`downloaded`/... arrays) are still read for verify/retry/resume.
+MANIFEST_VERSION = "download-folder-ndjson-1"
 
 
 def build_manifest_path(downloads_dir: Path, started_at: datetime) -> Path:
     timestamp = started_at.strftime("%Y-%m-%dT%H-%M-%S")
-    return downloads_dir / f"download-folder-run-{timestamp}.json"
+    return downloads_dir / f"download-folder-run-{timestamp}.ndjson"
 
 
 def build_retry_manifest_path(downloads_dir: Path, started_at: datetime) -> Path:
     timestamp = started_at.strftime("%Y-%m-%dT%H-%M-%S")
-    return downloads_dir / f"retry-manifest-run-{timestamp}.json"
+    return downloads_dir / f"retry-manifest-run-{timestamp}.ndjson"
 
 
 def ensure_destination_dir(destination: Path) -> Path:
@@ -40,148 +53,285 @@ def relative_path_from_destination(base_destination: Path, final_path: Path) -> 
         return final_path.name
 
 
-def write_manifest(report: DownloadFolderReport, repo_root: Path) -> None:
-    manifest = {
-        "version": "poc-download-folder-1.0",
-        "url": report.url,
-        "destination": str(report.destination),
-        "startedAt": report.started_at.isoformat(timespec="seconds"),
-        "finishedAt": report.finished_at.isoformat(timespec="seconds"),
-        "progressLogPath": (
-            str(report.progress_log_path)
-            if report.progress_log_path is not None
-            else None
-        ),
-        "downloaded": [
+class StreamingManifestWriter:
+    """Append per-file manifest records to disk as they are produced.
+
+    Only counts are held in memory, so the footprint stays ~O(1) in file count for
+    the whole run instead of growing one object per discovered/downloaded/skipped/
+    failed file. Records stream to a sibling ``<manifest>.partial`` journal, flushed
+    per record so a process freeze/OOM leaves a usable partial file. ``finalize``
+    appends the summary line and atomically ``os.replace``-s the journal into the
+    real manifest path, so a reader or glob never sees a half-written run.
+    """
+
+    def __init__(
+        self,
+        *,
+        manifest_path: Path,
+        repo_root: Path,
+        url: str,
+        destination: Path,
+        started_at: datetime,
+        progress_log_path: Path | None,
+    ) -> None:
+        self.manifest_path = manifest_path
+        self._partial_path = manifest_path.with_name(manifest_path.name + ".partial")
+        self._repo_root = repo_root
+        self._destination = destination
+        self._discovered = 0
+        self._downloaded = 0
+        self._skipped = 0
+        self._failed = 0
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self._partial_path.open("w", encoding="utf-8")
+        self._write_line(
             {
+                "type": "run",
+                "version": MANIFEST_VERSION,
+                "url": url,
+                "destination": str(destination),
+                "startedAt": started_at.isoformat(timespec="seconds"),
+                "progressLogPath": (
+                    str(progress_log_path) if progress_log_path is not None else None
+                ),
+            }
+        )
+
+    def __enter__(self) -> "StreamingManifestWriter":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def close(self) -> None:
+        # On success `finalize` has already closed the handle and renamed the
+        # partial into place. On an error path this just closes the handle and
+        # leaves the partial journal on disk so the streamed records survive.
+        if not self._handle.closed:
+            self._handle.close()
+
+    def _write_line(self, record: dict[str, object]) -> None:
+        # Flush (not fsync) per record: cheap, and enough to survive a Python-level
+        # crash/OOM because the bytes reach the OS page cache. This replaces the old
+        # in-memory list append that grew O(files) across the whole run.
+        self._handle.write(json.dumps(record) + "\n")
+        self._handle.flush()
+
+    def record_discovered(self, record: ManifestFileRecord) -> None:
+        self._write_line(
+            {
+                "type": "discovered",
+                "folderUrl": record.folder_url,
+                "relativePath": record.relative_path,
+                "fileName": record.file_name,
+                "finalPath": str(record.final_path),
+                "serverSizeText": record.server_size_text,
+                "serverModifiedText": record.server_modified_text,
+            }
+        )
+        self._discovered += 1
+
+    def record_downloaded(self, item: DownloadedFile) -> None:
+        self._write_line(
+            {
+                "type": "downloaded",
                 "fileName": item.file_name,
                 "relativePath": relative_path_from_destination(
-                    report.destination,
-                    item.final_path,
+                    self._destination, item.final_path
                 ),
-                "stagedPath": _serialize_path(item.staged_path, repo_root),
+                "stagedPath": _serialize_path(item.staged_path, self._repo_root),
                 "finalPath": str(item.final_path),
             }
-            for item in report.downloaded
-        ],
-        "skipped": [
+        )
+        self._downloaded += 1
+
+    def record_skipped(self, item: SkippedFile) -> None:
+        self._write_line(
             {
+                "type": "skipped",
                 "fileName": item.file_name,
                 "reason": item.reason,
                 "finalPath": (
                     str(item.final_path) if item.final_path is not None else None
                 ),
             }
-            for item in report.skipped
-        ],
-        "failed": [
+        )
+        self._skipped += 1
+
+    def record_failed(self, item: FailedFile) -> None:
+        self._write_line(
             {
+                "type": "failed",
                 "fileName": item.file_name,
                 "reason": item.reason,
                 "finalPath": (
                     str(item.final_path) if item.final_path is not None else None
                 ),
             }
-            for item in report.failed
-        ],
-        "discoveredFiles": [
+        )
+        self._failed += 1
+
+    @property
+    def counts(self) -> DownloadCounts:
+        return DownloadCounts(
+            discovered=self._discovered,
+            downloaded=self._downloaded,
+            skipped=self._skipped,
+            failed=self._failed,
+        )
+
+    def finalize(self, finished_at: datetime) -> DownloadCounts:
+        counts = self.counts
+        self._write_line(
             {
-                "folderUrl": item.folder_url,
-                "relativePath": item.relative_path,
-                "fileName": item.file_name,
-                "finalPath": str(item.final_path),
-                "serverSizeText": item.server_size_text,
-                "serverModifiedText": item.server_modified_text,
+                "type": "summary",
+                "finishedAt": finished_at.isoformat(timespec="seconds"),
+                "discovered": counts.discovered,
+                "downloaded": counts.downloaded,
+                "skipped": counts.skipped,
+                "failed": counts.failed,
             }
-            for item in report.discovered_files
-        ],
-    }
-    report.manifest_path.write_text(
-        json.dumps(manifest, indent=2) + "\n",
-        encoding="utf-8",
-    )
+        )
+        self._handle.close()
+        # Atomic publish onto the same volume as the journal: readers and globs only
+        # ever see a complete manifest, never a partially written run.
+        os.replace(self._partial_path, self.manifest_path)
+        return counts
 
 
-def load_download_manifest(manifest_path: Path) -> DownloadManifest:
+def _is_ndjson_manifest(manifest_path: Path) -> bool:
+    return manifest_path.suffix == ".ndjson"
+
+
+def _parse_ndjson_line(
+    line: str,
+    manifest_path: Path,
+    index: int,
+) -> dict[object, object]:
+    try:
+        parsed = json.loads(line)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"Invalid manifest line {index} in {manifest_path}: {error}"
+        ) from error
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"Manifest line {index} in {manifest_path} is not an object."
+        )
+    return cast(dict[object, object], parsed)
+
+
+def _iter_ndjson_records(
+    manifest_path: Path,
+) -> Iterator[tuple[int, dict[object, object]]]:
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        for index, line in enumerate(handle):
+            if not line.strip():
+                continue
+            yield index, _parse_ndjson_line(line, manifest_path, index)
+
+
+def _load_legacy_json_object(manifest_path: Path) -> dict[object, object]:
     raw_object = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(raw_object, dict):
         raise RuntimeError("Manifest must contain a JSON object.")
+    return cast(dict[object, object], raw_object)
 
-    raw_data = cast(dict[object, object], raw_object)
 
-    url = raw_data.get("url")
-    destination = raw_data.get("destination")
-    discovered_files = raw_data.get("discoveredFiles")
+def _require_str(value: object, field: str, index: int) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"Invalid {field} at index {index}.")
+    return value
 
+
+def _optional_str(value: object, field: str, index: int) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise RuntimeError(f"Invalid {field} at index {index}.")
+    return value
+
+
+def _parse_discovered_record(
+    record: dict[object, object],
+    index: int,
+) -> ManifestFileRecord:
+    return ManifestFileRecord(
+        folder_url=_require_str(record.get("folderUrl"), "folderUrl", index),
+        relative_path=_require_str(record.get("relativePath"), "relativePath", index),
+        file_name=_require_str(record.get("fileName"), "fileName", index),
+        final_path=Path(_require_str(record.get("finalPath"), "finalPath", index)),
+        server_size_text=_optional_str(
+            record.get("serverSizeText"), "serverSizeText", index
+        ),
+        server_modified_text=_optional_str(
+            record.get("serverModifiedText"), "serverModifiedText", index
+        ),
+    )
+
+
+def read_manifest_header(manifest_path: Path) -> ManifestHeader:
+    """Read run-level metadata (url, destination) without materializing records."""
+    if _is_ndjson_manifest(manifest_path):
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            first_line = handle.readline()
+        raw = _parse_ndjson_line(first_line, manifest_path, 0)
+        if raw.get("type") != "run":
+            raise RuntimeError("Manifest does not start with a run header line.")
+    else:
+        raw = _load_legacy_json_object(manifest_path)
+
+    url = raw.get("url")
+    destination = raw.get("destination")
     if not isinstance(url, str) or not url:
         raise RuntimeError("Manifest is missing a valid 'url'.")
     if not isinstance(destination, str) or not destination:
         raise RuntimeError("Manifest is missing a valid 'destination'.")
-    if not isinstance(discovered_files, list):
-        raise RuntimeError(
-            "Manifest lacks discoveredFiles inventory. Re-run download-folder with the current version first."
-        )
-
-    discovered_file_objects = cast(list[object], discovered_files)
-
-    parsed_discovered_files: list[ManifestFileRecord] = []
-    for index, item_object in enumerate(discovered_file_objects):
-        if not isinstance(item_object, dict):
-            raise RuntimeError(f"Invalid discoveredFiles item at index {index}.")
-
-        item = cast(dict[object, object], item_object)
-
-        folder_url = item.get("folderUrl")
-        relative_path = item.get("relativePath")
-        file_name = item.get("fileName")
-        final_path = item.get("finalPath")
-        server_size_text = item.get("serverSizeText")
-        server_modified_text = item.get("serverModifiedText")
-
-        if not isinstance(folder_url, str) or not folder_url:
-            raise RuntimeError(f"Invalid folderUrl at index {index}.")
-        if not isinstance(relative_path, str) or not relative_path:
-            raise RuntimeError(f"Invalid relativePath at index {index}.")
-        if not isinstance(file_name, str) or not file_name:
-            raise RuntimeError(f"Invalid fileName at index {index}.")
-        if not isinstance(final_path, str) or not final_path:
-            raise RuntimeError(f"Invalid finalPath at index {index}.")
-        if server_size_text is not None and not isinstance(server_size_text, str):
-            raise RuntimeError(f"Invalid serverSizeText at index {index}.")
-        if server_modified_text is not None and not isinstance(
-            server_modified_text, str
-        ):
-            raise RuntimeError(f"Invalid serverModifiedText at index {index}.")
-
-        parsed_discovered_files.append(
-            ManifestFileRecord(
-                folder_url=folder_url,
-                relative_path=relative_path,
-                file_name=file_name,
-                final_path=Path(final_path),
-                server_size_text=server_size_text,
-                server_modified_text=server_modified_text,
-            )
-        )
-
-    return DownloadManifest(
+    return ManifestHeader(
         manifest_path=manifest_path,
         url=url,
         destination=Path(destination),
-        discovered_files=parsed_discovered_files,
     )
 
 
+def iter_manifest_discovered_files(
+    manifest_path: Path,
+) -> Iterator[ManifestFileRecord]:
+    """Stream the discovered-file inventory one record at a time (both formats)."""
+    if _is_ndjson_manifest(manifest_path):
+        for index, record in _iter_ndjson_records(manifest_path):
+            if record.get("type") != "discovered":
+                continue
+            yield _parse_discovered_record(record, index)
+        return
+
+    raw = _load_legacy_json_object(manifest_path)
+    discovered_files = raw.get("discoveredFiles")
+    if not isinstance(discovered_files, list):
+        raise RuntimeError(
+            "Manifest lacks discoveredFiles inventory. Re-run download-folder "
+            "with the current version first."
+        )
+    for index, item_object in enumerate(cast(list[object], discovered_files)):
+        if not isinstance(item_object, dict):
+            raise RuntimeError(f"Invalid discoveredFiles item at index {index}.")
+        yield _parse_discovered_record(cast(dict[object, object], item_object), index)
+
+
 def verify_download_manifest(manifest_path: Path) -> ManifestVerification:
-    manifest = load_download_manifest(manifest_path)
-    missing_files = [
-        item for item in manifest.discovered_files if not item.final_path.exists()
-    ]
-    present_files = len(manifest.discovered_files) - len(missing_files)
+    expected_files = 0
+    missing_files = 0
+    for record in iter_manifest_discovered_files(manifest_path):
+        expected_files += 1
+        if not record.final_path.exists():
+            missing_files += 1
 
     return ManifestVerification(
         manifest_path=manifest_path,
-        expected_files=len(manifest.discovered_files),
-        present_files=present_files,
+        expected_files=expected_files,
+        present_files=expected_files - missing_files,
         missing_files=missing_files,
     )

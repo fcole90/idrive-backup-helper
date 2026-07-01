@@ -3,15 +3,16 @@ from pathlib import Path
 from typing import cast
 
 from idrive_backup_helper.browser.downloads.download_manifest import (
+    StreamingManifestWriter,
     build_retry_manifest_path,
-    load_download_manifest,
-    write_manifest,
+    iter_manifest_discovered_files,
+    read_manifest_header,
 )
 from idrive_backup_helper.browser.downloads.download_models import (
     DownloadFolderReport,
-    DownloadedFile,
     FailedFile,
     ManifestFileRecord,
+    ManifestHeader,
     OverwriteMode,
     RemoteFile,
     SkippedFile,
@@ -44,16 +45,7 @@ def retry_missing_files_from_manifest(
     overwrite: str,
     browser_debug_url: str | None = None,
 ) -> DownloadFolderReport:
-    manifest = load_download_manifest(manifest_path)
-    # One scandir per parent directory instead of a stat per discovered file; the
-    # manifest can list a very large tree and per-file stats are ~1s on slow
-    # destinations (external USB, network mounts).
-    startup_listings = DirectoryListingCache()
-    targets = [
-        item
-        for item in manifest.discovered_files
-        if not startup_listings.contains(item.final_path)
-    ]
+    header = read_manifest_header(manifest_path)
     overwrite_mode = cast(OverwriteMode, overwrite)
     started_at = datetime.now()
     progress_log_path = build_progress_log_path(
@@ -62,48 +54,51 @@ def retry_missing_files_from_manifest(
         prefix="retry-manifest-progress",
     )
     progress_logger = ProgressEventLogger(progress_log_path)
+
+    # Stream the manifest inventory and keep only the still-missing files, grouped
+    # by folder. One scandir per parent directory (DirectoryListingCache) instead of
+    # a stat per discovered file; the manifest can list a very large tree and
+    # per-file stats are ~1s on slow destinations (external USB, network mounts).
+    # Memory stays O(missing files) rather than O(whole manifest).
+    startup_listings = DirectoryListingCache()
+    grouped_targets: dict[tuple[str, Path], list[ManifestFileRecord]] = {}
+    target_count = 0
+    for item in iter_manifest_discovered_files(manifest_path):
+        if startup_listings.contains(item.final_path):
+            continue
+        grouped_targets.setdefault(
+            (item.folder_url, item.final_path.parent), []
+        ).append(item)
+        target_count += 1
+
+    retry_manifest_path = build_retry_manifest_path(downloads_dir, started_at)
+    repo_root = downloads_dir.parents[2]
+    manifest_writer = StreamingManifestWriter(
+        manifest_path=retry_manifest_path,
+        repo_root=repo_root,
+        url=header.url,
+        destination=header.destination,
+        started_at=started_at,
+        progress_log_path=progress_log_path,
+    )
     progress_logger.log(
         "run_started",
         mode="retry-manifest",
         manifestPath=str(manifest_path),
-        targetCount=len(targets),
+        targetCount=target_count,
         overwrite=overwrite_mode,
     )
 
-    downloaded: list[DownloadedFile] = []
-    skipped: list[SkippedFile] = []
-    failed: list[FailedFile] = []
-
-    if not targets:
-        report = DownloadFolderReport(
-            url=manifest.url,
-            destination=manifest.destination,
+    if not grouped_targets:
+        return _finish(
+            manifest_writer=manifest_writer,
+            progress_logger=progress_logger,
+            header=header,
             started_at=started_at,
-            finished_at=datetime.now(),
-            downloaded=[],
-            skipped=[],
-            failed=[],
-            discovered_files=[],
-            manifest_path=build_retry_manifest_path(downloads_dir, started_at),
             progress_log_path=progress_log_path,
         )
-        progress_logger.log(
-            "run_finished",
-            downloadedCount=0,
-            skippedCount=0,
-            failedCount=0,
-            manifestPath=str(report.manifest_path),
-            exitCode=report.exit_code,
-        )
-        write_manifest(report, downloads_dir.parents[2])
-        return report
 
-    grouped_targets: dict[tuple[str, Path], list[ManifestFileRecord]] = {}
-    for item in targets:
-        key = (item.folder_url, item.final_path.parent)
-        grouped_targets.setdefault(key, []).append(item)
-
-    staging_dir = staging_dir_for_destination(manifest.destination)
+    staging_dir = staging_dir_for_destination(header.destination)
     cleared_staging = clear_staging_dir(staging_dir)
     if cleared_staging:
         log_download_message(
@@ -142,6 +137,7 @@ def retry_missing_files_from_manifest(
                 available_files = {item.file_name for item in remote_entries.files}
 
                 for item in grouped_items:
+                    manifest_writer.record_discovered(item)
                     progress_logger.log(
                         "file_discovered",
                         folderUrl=folder_url,
@@ -155,7 +151,7 @@ def retry_missing_files_from_manifest(
                             relativePath=item.relative_path,
                             reason="destination exists",
                         )
-                        skipped.append(
+                        manifest_writer.record_skipped(
                             SkippedFile(
                                 file_name=item.file_name,
                                 reason="destination exists",
@@ -172,7 +168,7 @@ def retry_missing_files_from_manifest(
                             relativePath=item.relative_path,
                             reason=reason,
                         )
-                        failed.append(
+                        manifest_writer.record_failed(
                             FailedFile(
                                 file_name=item.file_name,
                                 reason=reason,
@@ -207,7 +203,7 @@ def retry_missing_files_from_manifest(
                             relativePath=item.relative_path,
                             reason=str(error),
                         )
-                        failed.append(
+                        manifest_writer.record_failed(
                             FailedFile(
                                 file_name=item.file_name,
                                 reason=str(error),
@@ -223,30 +219,47 @@ def retry_missing_files_from_manifest(
                         stagedPath=str(downloaded_file.staged_path),
                         finalPath=str(downloaded_file.final_path),
                     )
-                    downloaded.append(downloaded_file)
+                    manifest_writer.record_downloaded(downloaded_file)
     except Exception as error:
         progress_logger.log("run_failed", reason=str(error))
+        # Leave the partial journal on disk; do not publish a final manifest.
+        manifest_writer.close()
         raise
 
-    report = DownloadFolderReport(
-        url=manifest.url,
-        destination=manifest.destination,
+    return _finish(
+        manifest_writer=manifest_writer,
+        progress_logger=progress_logger,
+        header=header,
         started_at=started_at,
-        finished_at=datetime.now(),
-        downloaded=downloaded,
-        skipped=skipped,
-        failed=failed,
-        discovered_files=targets,
-        manifest_path=build_retry_manifest_path(downloads_dir, started_at),
+        progress_log_path=progress_log_path,
+    )
+
+
+def _finish(
+    *,
+    manifest_writer: StreamingManifestWriter,
+    progress_logger: ProgressEventLogger,
+    header: ManifestHeader,
+    started_at: datetime,
+    progress_log_path: Path,
+) -> DownloadFolderReport:
+    finished_at = datetime.now()
+    counts = manifest_writer.finalize(finished_at)
+    report = DownloadFolderReport(
+        url=header.url,
+        destination=header.destination,
+        started_at=started_at,
+        finished_at=finished_at,
+        counts=counts,
+        manifest_path=manifest_writer.manifest_path,
         progress_log_path=progress_log_path,
     )
     progress_logger.log(
         "run_finished",
-        downloadedCount=len(downloaded),
-        skippedCount=len(skipped),
-        failedCount=len(failed),
-        manifestPath=str(report.manifest_path),
+        downloadedCount=counts.downloaded,
+        skippedCount=counts.skipped,
+        failedCount=counts.failed,
+        manifestPath=str(manifest_writer.manifest_path),
         exitCode=report.exit_code,
     )
-    write_manifest(report, downloads_dir.parents[2])
     return report

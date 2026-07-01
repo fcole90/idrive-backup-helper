@@ -136,26 +136,48 @@ def load_folder_entries_cache(
 
 
 def _manifest_paths(downloads_dir: Path) -> list[Path]:
+    # Both the legacy pretty-printed `.json` manifests and the current streamed
+    # `.ndjson` manifests count for resume. `<name>.ndjson.partial` journals from a
+    # crashed run end in `.partial`, so `*.ndjson` never matches them.
     return sorted(
         [
             *downloads_dir.glob("download-folder-run-*.json"),
+            *downloads_dir.glob("download-folder-run-*.ndjson"),
             *downloads_dir.glob("retry-manifest-run-*.json"),
+            *downloads_dir.glob("retry-manifest-run-*.ndjson"),
         ]
     )
 
 
 def _manifest_sort_key(manifest_path: Path) -> tuple[str, float]:
+    mtime = manifest_path.stat().st_mtime
     try:
+        if manifest_path.suffix == ".ndjson":
+            # ndjson records `finishedAt` only in its trailing summary line, but the
+            # header's `startedAt` (line 0) is cheap to read and orders sequential
+            # runs identically for the "latest state wins" merge below.
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                first_line = handle.readline()
+            if first_line.strip():
+                header_object = json.loads(first_line)
+                if isinstance(header_object, dict):
+                    started_at = cast(dict[object, object], header_object).get(
+                        "startedAt"
+                    )
+                    if isinstance(started_at, str):
+                        return (started_at, mtime)
+            return ("", mtime)
+
         payload_object = json.loads(manifest_path.read_text(encoding="utf-8"))
         if isinstance(payload_object, dict):
             payload = cast(dict[object, object], payload_object)
             finished_at = payload.get("finishedAt")
             if isinstance(finished_at, str):
-                return (finished_at, manifest_path.stat().st_mtime)
+                return (finished_at, mtime)
     except OSError, json.JSONDecodeError:
         pass
 
-    return ("", manifest_path.stat().st_mtime)
+    return ("", mtime)
 
 
 def _extract_relative_path(
@@ -181,6 +203,89 @@ def _extract_relative_path(
     return None
 
 
+def _apply_legacy_json_manifest(
+    manifest_path: Path,
+    *,
+    url: str,
+    destination: Path,
+    status_by_path: dict[str, bool],
+) -> None:
+    try:
+        payload_object = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except OSError, json.JSONDecodeError:
+        return
+
+    if not isinstance(payload_object, dict):
+        return
+
+    payload = cast(dict[object, object], payload_object)
+    # Match on the folder URL only. Success is keyed by the URL and the
+    # destination-relative path, so resume knowledge stays valid when the
+    # `--to` destination changes (or the tree is copied to another machine).
+    # The skip decision in download_run re-checks that the file is actually
+    # present at the current destination before trusting this index.
+    if payload.get("url") != url:
+        return
+
+    for section, succeeded in (
+        ("downloaded", True),
+        ("skipped", True),
+        ("failed", False),
+    ):
+        section_object = payload.get(section)
+        if not isinstance(section_object, list):
+            continue
+        for item in cast(list[object], section_object):
+            relative_path = _extract_relative_path(item, destination)
+            if relative_path is not None:
+                status_by_path[relative_path] = succeeded
+
+
+def _apply_ndjson_manifest(
+    manifest_path: Path,
+    *,
+    url: str,
+    destination: Path,
+    status_by_path: dict[str, bool],
+) -> None:
+    # Same URL-keyed, destination-relative success index as the legacy path, read
+    # one record per line so a huge manifest never lands fully in memory.
+    success_by_type = {"downloaded": True, "skipped": True, "failed": False}
+    matched_url = False
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record_object = json.loads(line)
+                except json.JSONDecodeError:
+                    return
+                if not isinstance(record_object, dict):
+                    continue
+                record = cast(dict[object, object], record_object)
+                record_type = record.get("type")
+                if record_type == "run":
+                    if record.get("url") != url:
+                        return
+                    matched_url = True
+                    continue
+                # Ignore outcome records until the run header has confirmed the URL,
+                # so a headerless/foreign file never leaks into this URL's index.
+                if not matched_url:
+                    continue
+                if (
+                    not isinstance(record_type, str)
+                    or record_type not in success_by_type
+                ):
+                    continue
+                relative_path = _extract_relative_path(record, destination)
+                if relative_path is not None:
+                    status_by_path[relative_path] = success_by_type[record_type]
+    except OSError:
+        return
+
+
 def load_resume_success_relative_paths(
     downloads_dir: Path,
     *,
@@ -190,46 +295,19 @@ def load_resume_success_relative_paths(
     status_by_path: dict[str, bool] = {}
 
     for manifest_path in sorted(_manifest_paths(downloads_dir), key=_manifest_sort_key):
-        try:
-            payload_object = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except OSError, json.JSONDecodeError:
-            continue
-
-        if not isinstance(payload_object, dict):
-            continue
-
-        payload = cast(dict[object, object], payload_object)
-        manifest_url = payload.get("url")
-        # Match on the folder URL only. Success is keyed by the URL and the
-        # destination-relative path, so resume knowledge stays valid when the
-        # `--to` destination changes (or the tree is copied to another machine).
-        # The skip decision in download_run re-checks that the file is actually
-        # present at the current destination before trusting this index.
-        if manifest_url != url:
-            continue
-
-        downloaded_object = payload.get("downloaded")
-        if isinstance(downloaded_object, list):
-            downloaded_items = cast(list[object], downloaded_object)
-            for item in downloaded_items:
-                relative_path = _extract_relative_path(item, destination)
-                if relative_path is not None:
-                    status_by_path[relative_path] = True
-
-        skipped_object = payload.get("skipped")
-        if isinstance(skipped_object, list):
-            skipped_items = cast(list[object], skipped_object)
-            for item in skipped_items:
-                relative_path = _extract_relative_path(item, destination)
-                if relative_path is not None:
-                    status_by_path[relative_path] = True
-
-        failed_object = payload.get("failed")
-        if isinstance(failed_object, list):
-            failed_items = cast(list[object], failed_object)
-            for item in failed_items:
-                relative_path = _extract_relative_path(item, destination)
-                if relative_path is not None:
-                    status_by_path[relative_path] = False
+        if manifest_path.suffix == ".ndjson":
+            _apply_ndjson_manifest(
+                manifest_path,
+                url=url,
+                destination=destination,
+                status_by_path=status_by_path,
+            )
+        else:
+            _apply_legacy_json_manifest(
+                manifest_path,
+                url=url,
+                destination=destination,
+                status_by_path=status_by_path,
+            )
 
     return {path for path, succeeded in status_by_path.items() if succeeded}

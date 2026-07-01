@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -113,8 +114,11 @@ def test_download_current_folder_loads_cached_folder_before_first_download(
     )
 
     assert load_calls == [folder_url]
-    assert [skipped.file_name for skipped in report.skipped] == ["already.txt"]
-    assert [downloaded.file_name for downloaded in report.downloaded] == ["needed.txt"]
+    records = _read_manifest_records(report.manifest_path)
+    assert _file_names(records, "skipped") == ["already.txt"]
+    assert _file_names(records, "downloaded") == ["needed.txt"]
+    assert report.counts.skipped == 1
+    assert report.counts.downloaded == 1
 
 
 def test_download_current_folder_logs_file_decisions(
@@ -256,7 +260,20 @@ def test_download_current_folder_redownloads_when_resume_success_file_missing(
     # Both files are re-downloaded because none exist at the fresh destination,
     # even though the resume log marks them as previously successful.
     assert sorted(transferred) == ["already.txt", "needed.txt"]
-    assert report.skipped == []
+    assert report.counts.skipped == 0
+
+
+def _read_manifest_records(manifest_path: Path) -> list[dict[str, object]]:
+    lines = manifest_path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def _file_names(records: list[dict[str, object]], record_type: str) -> list[str]:
+    return [
+        cast(str, record["fileName"])
+        for record in records
+        if record.get("type") == record_type
+    ]
 
 
 def _fake_load_folder_entries_with_retry(

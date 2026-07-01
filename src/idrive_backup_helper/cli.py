@@ -210,9 +210,9 @@ def _run_download_folder(
     )
 
     print(f"Destination: {destination}")
-    print(f"Downloaded: {len(report.downloaded)}")
-    print(f"Skipped: {len(report.skipped)}")
-    print(f"Failed: {len(report.failed)}")
+    print(f"Downloaded: {report.counts.downloaded}")
+    print(f"Skipped: {report.counts.skipped}")
+    print(f"Failed: {report.counts.failed}")
     if report.progress_log_path is not None:
         print(f"Progress log: {report.progress_log_path}")
     print(f"Manifest: {report.manifest_path}")
@@ -224,7 +224,7 @@ def _run_verify_manifest(manifest_path: Path) -> int:
     print(f"Manifest: {manifest_path}")
     print(f"Expected files: {verification.expected_files}")
     print(f"Present files: {verification.present_files}")
-    print(f"Missing files: {len(verification.missing_files)}")
+    print(f"Missing files: {verification.missing_files}")
     return verification.exit_code
 
 
@@ -260,9 +260,9 @@ def _run_retry_manifest(
         browser_debug_url=effective_browser_debug_url,
     )
     print(f"Manifest: {report.manifest_path}")
-    print(f"Retried downloads: {len(report.downloaded)}")
-    print(f"Skipped: {len(report.skipped)}")
-    print(f"Failed: {len(report.failed)}")
+    print(f"Retried downloads: {report.counts.downloaded}")
+    print(f"Skipped: {report.counts.skipped}")
+    print(f"Failed: {report.counts.failed}")
     if report.progress_log_path is not None:
         print(f"Progress log: {report.progress_log_path}")
     return report.exit_code
