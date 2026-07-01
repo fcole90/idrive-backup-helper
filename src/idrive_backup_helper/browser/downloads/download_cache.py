@@ -8,7 +8,10 @@ from idrive_backup_helper.browser.downloads.download_entries import (
     ensure_raw_file_list,
     parse_remote_entries,
 )
-from idrive_backup_helper.browser.downloads.download_models import RemoteEntries
+from idrive_backup_helper.browser.downloads.download_models import (
+    CachedFolderEntries,
+    RemoteEntries,
+)
 from idrive_backup_helper.browser.downloads.folder_urls import normalized_folder_url
 
 # Bump ONLY when the serialized `entries` shape or field semantics change in a way
@@ -77,10 +80,16 @@ def write_folder_entries_cache(
     cache_dir = _folder_cache_dir(downloads_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = _folder_cache_path(downloads_dir, folder_url)
+    # The only caller writes the cache after a successful load+settle, so an empty
+    # listing here is a genuine confirmed-empty folder rather than a glitched load.
+    # Persist that so re-runs can trust it instead of re-navigating (an empty cache
+    # written before this field existed lacks it and stays untrusted on read).
+    confirmed_empty = not entries.files and not entries.folders
     payload = {
         "cacheVersion": FOLDER_ENTRIES_DATA_VERSION,
         "url": folder_url,
         "cachedAt": datetime.now().isoformat(timespec="seconds"),
+        "confirmedEmpty": confirmed_empty,
         "entries": _serialize_remote_entries(entries),
     }
     cache_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -89,7 +98,7 @@ def write_folder_entries_cache(
 def load_folder_entries_cache(
     downloads_dir: Path,
     folder_url: str,
-) -> RemoteEntries | None:
+) -> CachedFolderEntries | None:
     cache_path = _folder_cache_path(downloads_dir, folder_url)
     legacy_path = _legacy_folder_cache_path(downloads_dir, folder_url)
 
@@ -122,17 +131,25 @@ def load_folder_entries_cache(
     except ValueError:
         return None
 
+    # Missing field (legacy payload) reads as False, so an old empty cache stays
+    # untrusted and is reloaded by the caller instead of being taken as empty.
+    confirmed_empty = payload.get("confirmedEmpty") is True
+
     # Lazily migrate a compatible cache so the expensive crawl data is preserved
     # and not re-validated again: re-stamp an older payload version and/or re-key a
-    # legacy (raw-URL) entry under the current normalized-URL filename.
+    # legacy (raw-URL) entry under the current normalized-URL filename. Skip the
+    # re-stamp for an untrusted empty listing: rewriting it through the current
+    # writer would stamp confirmedEmpty=True and wrongly promote a glitchy legacy
+    # empty to trusted. The caller reloads it and rewrites a correct entry anyway.
+    has_entries = bool(entries.files or entries.folders)
     stale_version = cache_version != FOLDER_ENTRIES_DATA_VERSION
     legacy_key = source_path != cache_path
-    if stale_version or legacy_key:
+    if (stale_version or legacy_key) and (has_entries or confirmed_empty):
         write_folder_entries_cache(downloads_dir, folder_url, entries)
     if legacy_key:
         legacy_path.unlink(missing_ok=True)
 
-    return entries
+    return CachedFolderEntries(entries=entries, confirmed_empty=confirmed_empty)
 
 
 def _manifest_paths(downloads_dir: Path) -> list[Path]:

@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 import hashlib
 import html
@@ -40,8 +40,16 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.session import ensure_authenticated_page
 
-FOLDER_SETTLE_POLL_MS = 1_000
-FOLDER_SETTLE_STABLE_TICKS = 10
+# Settle polling backs off instead of waiting a fixed ~10s per folder: check at
+# ~1s, then 2/4/8s, then cap at 10s until the folder is ready. A fast folder
+# settles in ~1s; only a genuinely slow load pays the longer waits.
+FOLDER_SETTLE_BACKOFF_MS = (1_000, 2_000, 4_000, 8_000)
+FOLDER_SETTLE_MAX_INTERVAL_MS = 10_000
+# Human-ish +/- jitter applied to each interval so the cadence is not robotic.
+FOLDER_SETTLE_JITTER_MS = 200
+# An empty listing is ambiguous with "not started", so confirm across this many
+# consecutive loader-gone, zero-row checks before treating the folder as empty.
+FOLDER_SETTLE_EMPTY_CONFIRM_CHECKS = 2
 FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
@@ -226,21 +234,35 @@ def _read_folder_view_state(page: FolderViewPage) -> FolderViewState:
     )
 
 
+def _settle_backoff_intervals() -> Iterator[int]:
+    yield from FOLDER_SETTLE_BACKOFF_MS
+    while True:
+        yield FOLDER_SETTLE_MAX_INTERVAL_MS
+
+
+def _jittered(interval_ms: int) -> int:
+    jitter = random.randint(-FOLDER_SETTLE_JITTER_MS, FOLDER_SETTLE_JITTER_MS)
+    return max(FOLDER_SETTLE_JITTER_MS, interval_ms + jitter)
+
+
 def wait_for_folder_view_settle(page: FolderViewPage, timeout_ms: int) -> None:
     page.wait_for_selector("#file_list_container", state="attached", timeout=timeout_ms)
 
     deadline = time.monotonic() + (timeout_ms / 1000)
-    stable_ticks = 0
-    last_content_row_count = -1
+    intervals = _settle_backoff_intervals()
+    empty_checks = 0
     next_loader_log_at = 0.0
 
-    while time.monotonic() < deadline:
+    # Wait before the first read so navigation has cleared the previous folder's
+    # rows and shown the loader; checking at t=0 could otherwise settle on stale
+    # content. A fast folder is then confirmed on that first ~1s check.
+    while True:
+        page.wait_for_timeout(_jittered(next(intervals)))
         view_state = _read_folder_view_state(page)
         now = time.monotonic()
 
         if view_state.loader_visible:
-            stable_ticks = 0
-            last_content_row_count = view_state.content_row_count
+            empty_checks = 0
             if now >= next_loader_log_at:
                 seconds_remaining = max(0, int(deadline - now))
                 _log(
@@ -250,26 +272,24 @@ def wait_for_folder_view_settle(page: FolderViewPage, timeout_ms: int) -> None:
                     f"{seconds_remaining}s remaining)"
                 )
                 next_loader_log_at = now + FOLDER_LOADER_LOG_INTERVAL_SECONDS
-            page.wait_for_timeout(FOLDER_SETTLE_POLL_MS)
-            continue
-
-        if view_state.content_row_count == last_content_row_count:
-            stable_ticks += 1
-        else:
-            stable_ticks = 0
-            last_content_row_count = view_state.content_row_count
-
-        if stable_ticks >= FOLDER_SETTLE_STABLE_TICKS:
+        elif view_state.content_row_count > 0:
             _log(
                 "Folder view settled "
                 f"({view_state.content_row_count} content row(s), "
                 f"{view_state.total_row_count} total row(s))"
             )
             return
+        else:
+            empty_checks += 1
+            if empty_checks >= FOLDER_SETTLE_EMPTY_CONFIRM_CHECKS:
+                _log(
+                    "Folder view settled empty after "
+                    f"{empty_checks} check(s) (0 content row(s))"
+                )
+                return
 
-        page.wait_for_timeout(FOLDER_SETTLE_POLL_MS)
-
-    raise RuntimeError("Timed out waiting for folder loader to finish")
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Timed out waiting for folder loader to finish")
 
 
 def _read_breadcrumb_titles(page: Page) -> list[str]:
@@ -377,22 +397,62 @@ def _ensure_idrive_click_path(target_url: str, path_parts: list[str]) -> None:
         )
 
 
-def _idrive_click_start_index(current_url: str, target_path_parts: list[str]) -> int:
-    if not is_idrive_url(current_url):
-        return 0
+type NavigationAction = Literal["click_down", "breadcrumb_up", "go_home"]
 
-    try:
-        current_path_parts = idrive_folder_path_parts(current_url)
-    except RuntimeError:
-        return 0
 
-    if len(current_path_parts) > len(target_path_parts):
-        return 0
+@dataclass(frozen=True)
+class NavigationPlan:
+    action: NavigationAction
+    start_index: int
 
-    if target_path_parts[: len(current_path_parts)] != current_path_parts:
-        return 0
 
-    return len(current_path_parts)
+def plan_breadcrumb_navigation(
+    current_titles: list[str], target_display_parts: list[str]
+) -> NavigationPlan:
+    """Decide how to reach ``target_display_parts`` from the current breadcrumb.
+
+    The breadcrumb (not ``page.url``) is the source of truth for where we are, so
+    sibling/cousin hops go up to the shared ancestor via one breadcrumb click
+    instead of restarting from IDrive home and re-clicking the whole path.
+    """
+    if not target_display_parts:
+        return NavigationPlan(action="click_down", start_index=0)
+
+    root = target_display_parts[0]
+    if root not in current_titles:
+        # Different root, or no usable breadcrumb: restart from home.
+        return NavigationPlan(action="go_home", start_index=0)
+
+    # Drop any breadcrumb chrome before the target root (e.g. a leading "Home").
+    aligned_current = current_titles[current_titles.index(root) :]
+    common = 0
+    for current_title, target_part in zip(aligned_current, target_display_parts):
+        if current_title != target_part:
+            break
+        common += 1
+
+    if common >= len(aligned_current):
+        # Current folder is an ancestor of (or equal to) the target: click straight
+        # down the remaining segments, no breadcrumb hop needed.
+        return NavigationPlan(action="click_down", start_index=common)
+
+    # Current folder is deeper than / diverges from the common ancestor: hop up to
+    # it via the breadcrumb (ancestor is at path index common - 1), then click down.
+    return NavigationPlan(action="breadcrumb_up", start_index=common)
+
+
+def _click_breadcrumb(page: Page, candidates: list[str]) -> None:
+    script = _load_js_asset("click_breadcrumb_by_name.js")
+    result: object = page.evaluate(
+        script,
+        {
+            "title": candidates[0],
+            "titleCandidates": candidates,
+            "settleMinMs": FOLDER_CLICK_SETTLE_MIN_MS,
+            "settleMaxMs": FOLDER_CLICK_SETTLE_MAX_MS,
+        },
+    )
+    _ensure_click_result(result, candidates[0])
 
 
 def navigate_to_folder_with_clicks(
@@ -409,22 +469,39 @@ def navigate_to_folder_with_clicks(
         page.goto(target_url, wait_until="domcontentloaded")
         return
 
+    target_display_parts = [
+        _folder_click_name_candidates(path_part, index)[0]
+        for index, path_part in enumerate(path_parts)
+    ]
     if is_idrive_url(target_url):
-        click_path = [
-            _folder_click_name_candidates(path_part, index)[0]
-            for index, path_part in enumerate(path_parts)
-        ]
-        _log(f"Resolved IDrive click path: {' / '.join(click_path)}")
+        _log(f"Resolved IDrive click path: {' / '.join(target_display_parts)}")
 
-    home_url = _idrive_home_url(target_url)
-    start_index = _idrive_click_start_index(page.url, path_parts)
-    if start_index > 0:
-        current_prefix = " / ".join(path_parts[:start_index])
-        _log(f"Current tab is already at IDrive path prefix: {current_prefix}")
-    elif not is_current_folder_url(page.url, home_url):
-        _log(f"Navigating to IDrive home before folder clicks: {home_url}")
-        page.goto(home_url, wait_until="domcontentloaded")
+    current_titles = _read_breadcrumb_titles(page)
+    plan = plan_breadcrumb_navigation(current_titles, target_display_parts)
+    start_index = plan.start_index
+
+    if plan.action == "go_home":
+        home_url = _idrive_home_url(target_url)
+        if is_current_folder_url(page.url, home_url):
+            _log(f"Current tab is already at IDrive home: {home_url}")
+        else:
+            _log(f"Navigating to IDrive home before folder clicks: {home_url}")
+            page.goto(home_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(_human_delay_ms())
+    elif plan.action == "breadcrumb_up":
+        ancestor_index = start_index - 1
+        ancestor_candidates = _folder_click_name_candidates(
+            path_parts[ancestor_index], ancestor_index
+        )
+        _log(
+            "Traversing up via breadcrumb to common ancestor: "
+            f"{ancestor_candidates[0]}"
+        )
+        _click_breadcrumb(page, ancestor_candidates)
         page.wait_for_timeout(_human_delay_ms())
+    elif start_index > 0:
+        current_prefix = " / ".join(target_display_parts[:start_index])
+        _log(f"Current tab is already at IDrive path prefix: {current_prefix}")
 
     click_folder_script = _load_js_asset("click_folder_by_name.js")
     for index, folder_name in enumerate(path_parts[start_index:], start=start_index):
@@ -519,14 +596,10 @@ def load_folder_entries_with_retry(
     use_folder_cache: bool,
 ) -> RemoteEntries:
     if use_folder_cache:
-        cached_entries = load_folder_entries_cache(downloads_dir, target_url)
-        if cached_entries is not None:
-            if not cached_entries.files and not cached_entries.folders:
-                _log(
-                    "Ignoring empty cached folder entries and reloading: "
-                    f"{target_url}"
-                )
-            else:
+        cached = load_folder_entries_cache(downloads_dir, target_url)
+        if cached is not None:
+            cached_entries = cached.entries
+            if cached_entries.files or cached_entries.folders:
                 cached_entries = normalize_remote_entries_hrefs(cached_entries)
                 _log(
                     "Using cached folder entries: "
@@ -534,6 +607,10 @@ def load_folder_entries_with_retry(
                     f"{len(cached_entries.folders)} folder(s))"
                 )
                 return cached_entries
+            if cached.confirmed_empty:
+                _log(f"Using cached confirmed-empty folder: {target_url}")
+                return cached_entries
+            _log(f"Ignoring untrusted empty cache and reloading: {target_url}")
 
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder entries retry exhausted")

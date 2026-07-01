@@ -230,7 +230,9 @@ def test_folder_entries_cache_roundtrip(tmp_path: Path) -> None:
     write_folder_entries_cache(downloads_dir, "https://example.com/root", entries)
     cached = load_folder_entries_cache(downloads_dir, "https://example.com/root")
 
-    assert cached == entries
+    assert cached is not None
+    assert cached.entries == entries
+    assert cached.confirmed_empty is False
 
 
 def test_folder_entries_cache_adopts_legacy_unversioned_payload(
@@ -263,7 +265,8 @@ def test_folder_entries_cache_adopts_legacy_unversioned_payload(
     cached = load_folder_entries_cache(downloads_dir, folder_url)
 
     # The expensive crawl data is reused, not discarded, across the version bump.
-    assert cached == RemoteEntries(
+    assert cached is not None
+    assert cached.entries == RemoteEntries(
         files=[],
         folders=[RemoteFolder(folder_name="kept", href="https://example.com/kept")],
     )
@@ -307,9 +310,9 @@ def test_folder_entries_cache_matches_equivalent_url_variants(tmp_path: Path) ->
 
     # A trailing-slash variant of the same folder URL resolves to the same cache
     # entry instead of missing and triggering a fresh crawl.
-    assert (
-        load_folder_entries_cache(downloads_dir, "https://example.com/root/") == entries
-    )
+    cached = load_folder_entries_cache(downloads_dir, "https://example.com/root/")
+    assert cached is not None
+    assert cached.entries == entries
 
 
 def test_folder_entries_cache_migrates_legacy_raw_url_key(tmp_path: Path) -> None:
@@ -347,7 +350,8 @@ def test_folder_entries_cache_migrates_legacy_raw_url_key(tmp_path: Path) -> Non
 
     cached = load_folder_entries_cache(downloads_dir, request_url)
 
-    assert cached == RemoteEntries(
+    assert cached is not None
+    assert cached.entries == RemoteEntries(
         files=[],
         folders=[RemoteFolder(folder_name="kept", href="https://example.com/kept")],
     )

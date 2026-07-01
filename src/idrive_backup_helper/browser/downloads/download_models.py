@@ -25,6 +25,19 @@ class RemoteEntries:
 
 
 @dataclass(frozen=True)
+class CachedFolderEntries:
+    """A cached listing plus whether an empty listing was a confirmed-empty load.
+
+    `confirmed_empty` distinguishes a folder that successfully settled with zero
+    entries (trustworthy, skip the reload) from a legacy cache written before that
+    distinction existed (untrusted; reload to be safe).
+    """
+
+    entries: RemoteEntries
+    confirmed_empty: bool
+
+
+@dataclass(frozen=True)
 class DownloadedFile:
     file_name: str
     staged_path: Path
