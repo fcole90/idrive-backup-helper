@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 from playwright.sync_api import (
+    BrowserContext,
     Download,
     Error as PlaywrightError,
     Page,
@@ -54,6 +55,12 @@ FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
 DOWNLOAD_START_TIMEOUT_MS = 60_000
+# IDrive opens the file download in a throwaway tab. A successful download turns
+# the response into an attachment and the tab auto-closes; a rejected path
+# (server replies with a JSON error such as {"desc":"INVALID PATH"}) renders in
+# the tab, which then lingers. Match those leftover tabs by the download endpoint
+# in their URL so a long run does not accumulate error tabs.
+DOWNLOAD_ARTIFACT_URL_MARKER = "downloadFile"
 IDRIVE_NAVIGATION_BUILD_ID = "ui-click-prefix-v3"
 FOLDER_CLICK_SETTLE_MIN_MS = 700
 FOLDER_CLICK_SETTLE_MAX_MS = 1_800
@@ -759,6 +766,34 @@ def ensure_folder_loaded_for_download(
     )
 
 
+def _looks_like_download_tab(url: str) -> bool:
+    # A tab still sitting on about:blank never navigated to a real page, so it is
+    # a spent download popup; otherwise only treat the download endpoint as ours.
+    return not url or url == "about:blank" or DOWNLOAD_ARTIFACT_URL_MARKER in url
+
+
+def _close_leftover_download_tabs(
+    context: BrowserContext, pages_before: list[Page], *, keep: Page
+) -> None:
+    before_ids = {id(page) for page in pages_before}
+    for tab in list(context.pages):
+        if tab is keep or id(tab) in before_ids:
+            continue
+        try:
+            if tab.is_closed():
+                continue
+            url = tab.url
+        except PlaywrightError:
+            url = ""
+        if not _looks_like_download_tab(url):
+            continue
+        try:
+            tab.close()
+            _log(f"Closed leftover download tab: {url or '<blank>'}")
+        except PlaywrightError as error:
+            _log(f"Failed to close leftover download tab ({url or '<blank>'}): {error}")
+
+
 def download_one_file(
     page: Page,
     remote_file: RemoteFile,
@@ -767,6 +802,9 @@ def download_one_file(
 ) -> Path:
     script = _load_js_asset("trigger_file_download.js")
     _log(f"Starting download: {remote_file.file_name}")
+
+    context = page.context
+    pages_before = list(context.pages)
 
     try:
         with page.expect_download(timeout=DOWNLOAD_START_TIMEOUT_MS) as download_info:
@@ -782,21 +820,33 @@ def download_one_file(
 
         download = download_info.value
     except PlaywrightTimeoutError as error:
+        _close_leftover_download_tabs(context, pages_before, keep=page)
         raise RuntimeError(
             "Timed out waiting for browser download to start: "
             f"{remote_file.file_name}. IDrive may still have a stale or blocked "
             "download in progress from a previous interrupted run."
         ) from error
     except PlaywrightError as error:
+        _close_leftover_download_tabs(context, pages_before, keep=page)
         raise RuntimeError(
             f"Download canceled by browser/session: {remote_file.file_name} ({error})"
         ) from error
+    except Exception:
+        # A trigger failure (e.g. the file row was never found) usually leaves no
+        # download tab open, but close defensively so no stray tab survives.
+        _close_leftover_download_tabs(context, pages_before, keep=page)
+        raise
 
     failure = download.failure()
     if failure is not None:
+        _close_leftover_download_tabs(context, pages_before, keep=page)
         raise RuntimeError(f"Download failed: {remote_file.file_name} ({failure})")
 
+    # Stage first: _stage_download_on_volume blocks on download.path() until the
+    # artifact is fully written, so the download-carrying tab is done by the time
+    # we sweep any leftover tabs.
     staged_path = _stage_download_on_volume(download, staging_dir, remote_file)
+    _close_leftover_download_tabs(context, pages_before, keep=page)
     _log(f"Staged download complete: {remote_file.file_name} -> {staged_path}")
     return staged_path
 

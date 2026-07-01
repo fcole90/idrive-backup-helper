@@ -832,6 +832,32 @@ def test_download_one_file_uses_bounded_download_start_timeout(
     assert page.expect_download_timeout == DOWNLOAD_START_TIMEOUT_MS
 
 
+def test_download_one_file_closes_leftover_error_tab_on_timeout(
+    tmp_path: Path,
+) -> None:
+    # A rejected path (INVALID PATH) leaves the download tab open showing the JSON
+    # error; the timeout path must close it while leaving unrelated tabs alone.
+    error_tab = FakeTab(
+        "https://evsweb5505.idrive.com/evs/v1/downloadFile?version=0&p=%2F%2FDRIVE"
+        "%2FTools%2FRoslyn%2FSystem.Security.Cryptography.Cng.dll"
+    )
+    unrelated_tab = FakeTab("https://www.idrive.com/idrive/home/device/F")
+    page = FakeDownloadTimeoutPage(
+        leftover_tab=error_tab, existing_tabs=[unrelated_tab]
+    )
+
+    with pytest.raises(RuntimeError, match="stale or blocked download"):
+        download_one_file(
+            cast(Page, page),
+            remote_file=_remote_file("System.Security.Cryptography.Cng.dll"),
+            staging_dir=tmp_path,
+            cooldown_ms=1500,
+        )
+
+    assert error_tab.closed is True
+    assert unrelated_tab.closed is False
+
+
 def test_download_one_file_fails_fast_when_trigger_reports_missing_row(
     tmp_path: Path,
 ) -> None:
@@ -1016,12 +1042,44 @@ class FakeClimbPage(FakeLoadPage):
         return {"ok": True}
 
 
+class FakeTab:
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self.closed = False
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeContext:
+    def __init__(self, pages: list[object]) -> None:
+        self.pages = pages
+
+
 class FakeDownloadTimeoutPage:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        leftover_tab: FakeTab | None = None,
+        existing_tabs: list[FakeTab] | None = None,
+    ) -> None:
         self.expect_download_timeout: float | None = None
+        self.context = FakeContext([self, *(existing_tabs or [])])
+        self._leftover_tab = leftover_tab
 
     def expect_download(self, *, timeout: float) -> "FakeDownloadTimeoutWaiter":
         self.expect_download_timeout = timeout
+        # Simulate IDrive opening the download tab during the trigger; on a
+        # rejected path the tab lingers rather than turning into an attachment.
+        if self._leftover_tab is not None:
+            self.context.pages.append(self._leftover_tab)
         return FakeDownloadTimeoutWaiter()
 
 
@@ -1041,6 +1099,7 @@ class FakeDownloadTimeoutWaiter:
 class FakeDownloadTriggerFailurePage:
     def __init__(self) -> None:
         self.evaluate_payload: object | None = None
+        self.context = FakeContext([self])
 
     def expect_download(self, *, timeout: float) -> "FakeDownloadTriggerFailureWaiter":
         assert timeout == DOWNLOAD_START_TIMEOUT_MS
@@ -1119,6 +1178,7 @@ class FakeDownloadPage:
     def __init__(self, download: FakeDownload) -> None:
         self._download = download
         self.evaluate_payload: object | None = None
+        self.context = FakeContext([self])
 
     def expect_download(self, *, timeout: float) -> FakeDownloadWaiter:
         assert timeout == DOWNLOAD_START_TIMEOUT_MS
