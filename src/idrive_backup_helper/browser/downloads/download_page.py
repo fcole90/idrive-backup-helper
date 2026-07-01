@@ -404,55 +404,93 @@ type NavigationAction = Literal["click_down", "breadcrumb_up", "go_home"]
 class NavigationPlan:
     action: NavigationAction
     start_index: int
+    hop_address_index: int | None = None
 
 
 def plan_breadcrumb_navigation(
-    current_titles: list[str], target_display_parts: list[str]
+    current_parts: list[str],
+    target_parts: list[str],
+    visible_address_indexes: list[int],
 ) -> NavigationPlan:
-    """Decide how to reach ``target_display_parts`` from the current breadcrumb.
+    """Decide how to reach ``target_parts`` from the current folder.
 
-    The breadcrumb (not ``page.url``) is the source of truth for where we are, so
-    sibling/cousin hops go up to the shared ancestor via one breadcrumb click
-    instead of restarting from IDrive home and re-clicking the whole path.
+    Both paths are the URL segments after ``/idrive/home`` (the URL is the reliable
+    source of the full depth; the breadcrumb collapses leading folders on deep
+    paths). ``visible_address_indexes`` are the ``addressindex`` values of the
+    breadcrumb crumbs that are actually clickable right now — a crumb's addressindex
+    is its position in the path, so it maps straight onto ``*_parts`` indexing.
     """
-    if not target_display_parts:
-        return NavigationPlan(action="click_down", start_index=0)
-
-    root = target_display_parts[0]
-    if root not in current_titles:
-        # Different root, or no usable breadcrumb: restart from home.
-        return NavigationPlan(action="go_home", start_index=0)
-
-    # Drop any breadcrumb chrome before the target root (e.g. a leading "Home").
-    aligned_current = current_titles[current_titles.index(root) :]
     common = 0
-    for current_title, target_part in zip(aligned_current, target_display_parts):
-        if current_title != target_part:
+    for current_part, target_part in zip(current_parts, target_parts):
+        if current_part != target_part:
             break
         common += 1
 
-    if common >= len(aligned_current):
-        # Current folder is an ancestor of (or equal to) the target: click straight
-        # down the remaining segments, no breadcrumb hop needed.
+    if common == 0:
+        # No shared ancestor (different root, or currently at home/blank): restart
+        # from home and click the whole path down. The go_home branch skips the goto
+        # when the tab is already at home.
+        return NavigationPlan(action="go_home", start_index=0)
+
+    if common == len(current_parts):
+        # Current folder is an ancestor of (or equal to) the target: descend by
+        # clicking straight down the remaining segments, no breadcrumb hop.
         return NavigationPlan(action="click_down", start_index=common)
 
-    # Current folder is deeper than / diverges from the common ancestor: hop up to
-    # it via the breadcrumb (ancestor is at path index common - 1), then click down.
-    return NavigationPlan(action="breadcrumb_up", start_index=common)
+    # Diverges below a shared ancestor. Hop up to the deepest still-clickable
+    # breadcrumb crumb on the shared prefix, then click down from there. The exact
+    # common ancestor may be collapsed on a deep path, but any visible shared
+    # ancestor (the device crumb almost always survives) still avoids a home restart.
+    hop_candidates = [index for index in visible_address_indexes if index <= common - 1]
+    if not hop_candidates:
+        return NavigationPlan(action="go_home", start_index=0)
+
+    hop_index = max(hop_candidates)
+    return NavigationPlan(
+        action="breadcrumb_up",
+        start_index=hop_index + 1,
+        hop_address_index=hop_index,
+    )
 
 
-def _click_breadcrumb(page: Page, candidates: list[str]) -> None:
-    script = _load_js_asset("click_breadcrumb_by_name.js")
+def _read_breadcrumb_address_indexes(page: Page) -> list[int]:
+    raw_indexes: object = page.evaluate("""
+() => {
+  const breadcrumb = document.querySelector('div.breadcrumb');
+  if (!breadcrumb) {
+    return [];
+  }
+
+  return [...breadcrumb.querySelectorAll('a.addfldr')]
+    .map((el) => Number.parseInt(el.getAttribute('addressindex'), 10))
+    .filter((index) => Number.isInteger(index));
+}
+""")
+    if not isinstance(raw_indexes, list):
+        return []
+
+    typed_indexes = cast(list[object], raw_indexes)
+    return [index for index in typed_indexes if isinstance(index, int)]
+
+
+def _current_idrive_path_parts(url: str) -> list[str]:
+    try:
+        return idrive_folder_path_parts(url)
+    except RuntimeError:
+        return []
+
+
+def _click_breadcrumb_by_index(page: Page, address_index: int) -> None:
+    script = _load_js_asset("click_breadcrumb_by_index.js")
     result: object = page.evaluate(
         script,
         {
-            "title": candidates[0],
-            "titleCandidates": candidates,
+            "addressIndex": address_index,
             "settleMinMs": FOLDER_CLICK_SETTLE_MIN_MS,
             "settleMaxMs": FOLDER_CLICK_SETTLE_MAX_MS,
         },
     )
-    _ensure_click_result(result, candidates[0])
+    _ensure_click_result(result, f"breadcrumb addressindex {address_index}")
 
 
 def navigate_to_folder_with_clicks(
@@ -476,8 +514,11 @@ def navigate_to_folder_with_clicks(
     if is_idrive_url(target_url):
         _log(f"Resolved IDrive click path: {' / '.join(target_display_parts)}")
 
-    current_titles = _read_breadcrumb_titles(page)
-    plan = plan_breadcrumb_navigation(current_titles, target_display_parts)
+    current_parts = _current_idrive_path_parts(page.url)
+    visible_address_indexes = _read_breadcrumb_address_indexes(page)
+    plan = plan_breadcrumb_navigation(
+        current_parts, path_parts, visible_address_indexes
+    )
     start_index = plan.start_index
 
     if plan.action == "go_home":
@@ -489,15 +530,13 @@ def navigate_to_folder_with_clicks(
             page.goto(home_url, wait_until="domcontentloaded")
             page.wait_for_timeout(_human_delay_ms())
     elif plan.action == "breadcrumb_up":
-        ancestor_index = start_index - 1
-        ancestor_candidates = _folder_click_name_candidates(
-            path_parts[ancestor_index], ancestor_index
-        )
+        assert plan.hop_address_index is not None
         _log(
             "Traversing up via breadcrumb to common ancestor: "
-            f"{ancestor_candidates[0]}"
+            f"{target_display_parts[plan.hop_address_index]} "
+            f"(addressindex {plan.hop_address_index})"
         )
-        _click_breadcrumb(page, ancestor_candidates)
+        _click_breadcrumb_by_index(page, plan.hop_address_index)
         page.wait_for_timeout(_human_delay_ms())
     elif start_index > 0:
         current_prefix = " / ".join(target_display_parts[:start_index])

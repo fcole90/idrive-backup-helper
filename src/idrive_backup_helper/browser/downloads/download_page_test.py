@@ -611,7 +611,7 @@ def test_navigate_to_folder_with_clicks_starts_after_current_idrive_prefix(
     )
     page = FakeClickPage(
         url="https://www.idrive.com/idrive/home/device/F",
-        breadcrumb_titles=["device", "F"],
+        breadcrumb_address_indexes=[0, 1],
     )
 
     navigate_to_folder_with_clicks(
@@ -642,7 +642,7 @@ def test_navigate_to_folder_with_clicks_hops_up_to_common_ancestor_via_breadcrum
     )
     page = FakeClickPage(
         url="https://www.idrive.com/idrive/home/device/F/other",
-        breadcrumb_titles=["device", "F", "other"],
+        breadcrumb_address_indexes=[0, 1, 2],
     )
 
     navigate_to_folder_with_clicks(
@@ -651,9 +651,10 @@ def test_navigate_to_folder_with_clicks_hops_up_to_common_ancestor_via_breadcrum
         60_000,
     )
 
-    # Sibling hop: up to the shared "F" via breadcrumb, then down the rest. No home.
+    # Sibling hop: up to the shared "F" (addressindex 1) via breadcrumb, then down
+    # the rest. No home restart.
     assert page.navigated_urls == []
-    assert [click["title"] for click in page.breadcrumb_clicks] == ["F"]
+    assert [click["addressIndex"] for click in page.breadcrumb_clicks] == [1]
     assert [payload["folderName"] for payload in page.evaluate_payloads] == [
         "path",
         "to",
@@ -676,7 +677,7 @@ def test_navigate_to_folder_with_clicks_restarts_from_home_for_different_root(
     # ancestor to hop to: fall back to home and click the whole path down.
     page = FakeClickPage(
         url="https://www.idrive.com/idrive/home/otherdevice/X",
-        breadcrumb_titles=["otherdevice", "X"],
+        breadcrumb_address_indexes=[0, 1],
     )
 
     navigate_to_folder_with_clicks(
@@ -697,44 +698,70 @@ def test_navigate_to_folder_with_clicks_restarts_from_home_for_different_root(
 
 
 def test_plan_breadcrumb_navigation_descends_when_current_is_prefix() -> None:
-    plan = plan_breadcrumb_navigation(["device", "F"], ["device", "F", "path", "to"])
+    plan = plan_breadcrumb_navigation(
+        ["device", "F"], ["device", "F", "path", "to"], [0, 1]
+    )
     assert plan == NavigationPlan(action="click_down", start_index=2)
 
 
 def test_plan_breadcrumb_navigation_hops_up_for_sibling() -> None:
-    plan = plan_breadcrumb_navigation(["device", "F", "other"], ["device", "F", "path"])
-    assert plan == NavigationPlan(action="breadcrumb_up", start_index=2)
+    plan = plan_breadcrumb_navigation(
+        ["device", "F", "other"], ["device", "F", "path"], [0, 1, 2]
+    )
+    assert plan == NavigationPlan(
+        action="breadcrumb_up", start_index=2, hop_address_index=1
+    )
 
 
 def test_plan_breadcrumb_navigation_hops_up_for_cousin() -> None:
     plan = plan_breadcrumb_navigation(
-        ["device", "A", "deep", "leaf"], ["device", "B", "target"]
+        ["device", "A", "deep", "leaf"], ["device", "B", "target"], [0, 1, 2, 3]
     )
-    assert plan == NavigationPlan(action="breadcrumb_up", start_index=1)
+    assert plan == NavigationPlan(
+        action="breadcrumb_up", start_index=1, hop_address_index=0
+    )
 
 
 def test_plan_breadcrumb_navigation_hops_up_to_reach_ancestor() -> None:
-    plan = plan_breadcrumb_navigation(["device", "F", "sub"], ["device", "F"])
-    assert plan == NavigationPlan(action="breadcrumb_up", start_index=2)
+    plan = plan_breadcrumb_navigation(
+        ["device", "F", "sub"], ["device", "F"], [0, 1, 2]
+    )
+    assert plan == NavigationPlan(
+        action="breadcrumb_up", start_index=2, hop_address_index=1
+    )
 
 
 def test_plan_breadcrumb_navigation_noop_when_already_at_target() -> None:
-    plan = plan_breadcrumb_navigation(["device", "F"], ["device", "F"])
+    plan = plan_breadcrumb_navigation(["device", "F"], ["device", "F"], [0, 1])
     assert plan == NavigationPlan(action="click_down", start_index=2)
 
 
-def test_plan_breadcrumb_navigation_ignores_leading_home_chrome() -> None:
-    plan = plan_breadcrumb_navigation(["Home", "device", "F"], ["device", "F", "path"])
-    assert plan == NavigationPlan(action="click_down", start_index=2)
+def test_plan_breadcrumb_navigation_hops_to_deepest_visible_when_collapsed() -> None:
+    # Deep path whose breadcrumb has collapsed the middle crumbs: only the device
+    # (0) and the current leaf (6) remain clickable. The plan must still hop up to
+    # the surviving shared ancestor (device) instead of restarting from home.
+    current = ["device", "DRIVE", "F1", "F2", "F3", "F4", "F5"]
+    target = ["device", "DRIVE", "F1", "F2", "F3", "F4", "F6"]
+    plan = plan_breadcrumb_navigation(current, target, [0, 6])
+    assert plan == NavigationPlan(
+        action="breadcrumb_up", start_index=1, hop_address_index=0
+    )
 
 
-def test_plan_breadcrumb_navigation_goes_home_for_different_root() -> None:
-    plan = plan_breadcrumb_navigation(["otherdevice", "X"], ["device", "F"])
+def test_plan_breadcrumb_navigation_goes_home_when_no_visible_common_ancestor() -> None:
+    plan = plan_breadcrumb_navigation(
+        ["device", "F", "sub"], ["device", "F", "other"], [2]
+    )
     assert plan == NavigationPlan(action="go_home", start_index=0)
 
 
-def test_plan_breadcrumb_navigation_goes_home_when_breadcrumb_empty() -> None:
-    plan = plan_breadcrumb_navigation([], ["device", "F"])
+def test_plan_breadcrumb_navigation_goes_home_for_different_root() -> None:
+    plan = plan_breadcrumb_navigation(["otherdevice", "X"], ["device", "F"], [0, 1])
+    assert plan == NavigationPlan(action="go_home", start_index=0)
+
+
+def test_plan_breadcrumb_navigation_goes_home_when_current_is_empty() -> None:
+    plan = plan_breadcrumb_navigation([], ["device", "F"], [])
     assert plan == NavigationPlan(action="go_home", start_index=0)
 
 
@@ -879,23 +906,25 @@ def _fake_wait_for_folder_view_settle(page: object, timeout_ms: int) -> None:
 
 
 def _fake_load_js_asset(name: str) -> str:
-    if name == "click_breadcrumb_by_name.js":
+    if name == "click_breadcrumb_by_index.js":
         return "fake breadcrumb script"
     assert name == "click_folder_by_name.js"
     return "fake folder script"
 
 
 class FakeClickPage(FakeLoadPage):
-    def __init__(self, url: str, breadcrumb_titles: list[str] | None = None) -> None:
+    def __init__(
+        self, url: str, breadcrumb_address_indexes: list[int] | None = None
+    ) -> None:
         super().__init__(url)
         self.evaluate_payloads: list[FolderClickPayload] = []
         self.breadcrumb_clicks: list[dict[str, object]] = []
-        self._breadcrumb_titles = breadcrumb_titles or []
+        self._breadcrumb_address_indexes = breadcrumb_address_indexes or []
 
     def evaluate(self, expression: str, payload: object = None) -> object:
         if payload is None:
             # Inline breadcrumb-read expression (single argument).
-            return list(self._breadcrumb_titles)
+            return list(self._breadcrumb_address_indexes)
         if expression == "fake breadcrumb script":
             self.breadcrumb_clicks.append(cast(dict[str, object], payload))
             return {"ok": True}

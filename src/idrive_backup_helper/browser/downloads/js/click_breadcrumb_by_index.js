@@ -1,9 +1,6 @@
-async ({ title, titleCandidates, settleMinMs, settleMaxMs }) => {
+async ({ addressIndex, settleMinMs, settleMaxMs }) => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const randomDelay = () => settleMinMs + Math.floor(Math.random() * (settleMaxMs - settleMinMs + 1));
-  const candidateNames = Array.isArray(titleCandidates) && titleCandidates.length > 0
-    ? titleCandidates
-    : [title];
 
   const forceClick = (el) => {
     ["mouseenter", "mouseover", "mousedown", "mouseup", "click"].forEach((eventName) => {
@@ -21,10 +18,14 @@ async ({ title, titleCandidates, settleMinMs, settleMaxMs }) => {
     return { ok: false, reason: "Breadcrumb container not found" };
   }
 
-  const nodes = [...breadcrumb.childNodes].filter((node) => node.nodeType === 1);
-  const target = nodes.find((el) => candidateNames.includes(el.title));
+  // A crumb's addressindex is its position in the folder path, so we click by that
+  // rather than by title: on a deep path the breadcrumb collapses leading crumbs
+  // and truncates their visible text, but the surviving crumbs keep addressindex.
+  const target = [...breadcrumb.querySelectorAll("a.addfldr")].find(
+    (el) => Number.parseInt(el.getAttribute("addressindex"), 10) === addressIndex
+  );
   if (!target) {
-    return { ok: false, reason: `Breadcrumb not found: ${candidateNames.join(" or ")}` };
+    return { ok: false, reason: `Breadcrumb addressindex not found: ${addressIndex}` };
   }
 
   target.scrollIntoView({ block: "center" });
