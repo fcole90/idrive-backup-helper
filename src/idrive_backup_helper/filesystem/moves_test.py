@@ -1,7 +1,9 @@
+import errno
 from pathlib import Path
 
 import pytest
 
+from idrive_backup_helper.filesystem import moves
 from idrive_backup_helper.filesystem.moves import (
     clear_staging_dir,
     move_download_to_destination,
@@ -67,6 +69,56 @@ def test_move_download_to_destination_replaces_existing_file(tmp_path: Path) -> 
     )
 
     assert final_path.read_text(encoding="utf-8") == "new payload"
+
+
+def test_move_download_to_destination_falls_back_to_copy_across_drives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Simulate a stage on a different drive (e.g. Playwright's C: temp with a D:
+    # destination): os.replace refuses the cross-device move, so we copy instead.
+    staged_path = tmp_path / "staging" / "example.txt"
+    staged_path.parent.mkdir(parents=True)
+    staged_path.write_text("payload", encoding="utf-8")
+
+    def fake_replace(src: str, dst: str) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(moves.os, "replace", fake_replace)
+
+    destination_dir = tmp_path / "destination"
+    final_path = move_download_to_destination(
+        staged_path,
+        destination_dir,
+        "example.txt",
+        replace_existing=False,
+    )
+
+    assert final_path == destination_dir / "example.txt"
+    assert final_path.read_text(encoding="utf-8") == "payload"
+    assert not staged_path.exists()
+
+
+def test_move_download_to_destination_reraises_non_cross_device_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged_path = tmp_path / "staging" / "example.txt"
+    staged_path.parent.mkdir(parents=True)
+    staged_path.write_text("payload", encoding="utf-8")
+
+    def fake_replace(src: str, dst: str) -> None:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(moves.os, "replace", fake_replace)
+
+    with pytest.raises(OSError, match="Permission denied"):
+        move_download_to_destination(
+            staged_path,
+            tmp_path / "destination",
+            "example.txt",
+            replace_existing=False,
+        )
 
 
 def test_clear_staging_dir_removes_leftover_files(tmp_path: Path) -> None:
