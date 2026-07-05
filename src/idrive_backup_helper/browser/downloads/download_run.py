@@ -1,9 +1,15 @@
 from datetime import datetime
 from pathlib import Path
+import time
 from typing import cast
 
 from idrive_backup_helper.browser.downloads.download_cache import (
     load_resume_success_relative_paths,
+)
+from idrive_backup_helper.browser.downloads.download_diagnostics import (
+    BrowserCrashContext,
+    capture_resource_snapshot,
+    render_crash_report,
 )
 from idrive_backup_helper.browser.downloads.download_manifest import (
     StreamingManifestWriter,
@@ -57,6 +63,69 @@ def _precheck_overwrite_conflicts(
         raise RuntimeError(f"Destination already contains files: {joined_names}")
 
 
+def _capture_browser_crash_diagnostics(
+    *,
+    engine: BrowserEngine,
+    downloads_dir: Path,
+    started_at: datetime,
+    run_started_monotonic: float,
+    folders_processed: int,
+    current_folder: FolderTask | None,
+    manifest_writer: StreamingManifestWriter,
+    progress_logger: ProgressEventLogger,
+    error: BrowserClosedError,
+) -> None:
+    # Fully best-effort: diagnostics must never mask or replace the browser-death
+    # abort they describe, so any failure here is logged and swallowed.
+    try:
+        counts = manifest_writer.counts
+        context = BrowserCrashContext(
+            error=str(error),
+            elapsed_seconds=time.monotonic() - run_started_monotonic,
+            folders_processed=folders_processed,
+            current_folder_url=current_folder.url if current_folder else None,
+            current_folder_destination=(
+                str(current_folder.destination) if current_folder else None
+            ),
+            discovered=counts.discovered,
+            downloaded=counts.downloaded,
+            skipped=counts.skipped,
+            failed=counts.failed,
+        )
+        health = engine.describe_browser_health()
+        resources = capture_resource_snapshot()
+        captured_at = datetime.now()
+        report_text = render_crash_report(
+            context=context,
+            health=health,
+            resources=resources,
+            captured_at=captured_at,
+        )
+        timestamp = started_at.strftime("%Y-%m-%dT%H-%M-%S")
+        report_path = downloads_dir / f"download-folder-crash-{timestamp}.md"
+        report_path.write_text(report_text, encoding="utf-8")
+        log_download_message(
+            f"Browser closed mid-run; wrote crash diagnostics: {report_path}"
+        )
+        progress_logger.log(
+            "browser_crash_diagnostics",
+            reportPath=str(report_path),
+            browserMode=health.mode,
+            cdpReachable=health.cdp_reachable,
+            detachedExitCode=health.detached_exit_code,
+            elapsedSeconds=round(context.elapsed_seconds, 1),
+            foldersProcessed=folders_processed,
+            processRssMb=(round(resources.process_rss_mb, 1) if resources else None),
+            systemAvailableMb=(
+                round(resources.system_available_mb, 1) if resources else None
+            ),
+        )
+    except Exception as diagnostics_error:
+        log_download_message(
+            f"Failed to capture browser-crash diagnostics: {diagnostics_error}"
+        )
+
+
 def download_current_folder(
     *,
     profile_dir: Path,
@@ -87,6 +156,7 @@ def download_current_folder(
         browser_debug_url=browser_debug_url,
     )
     started_at = datetime.now()
+    run_started_monotonic = time.monotonic()
     progress_log_path = build_progress_log_path(
         downloads_dir,
         started_at,
@@ -135,8 +205,12 @@ def download_current_folder(
         started_at=started_at,
         progress_log_path=progress_log_path,
     )
+    folders_processed = 0
+    current_folder: FolderTask | None = None
+    engine_ref: BrowserEngine | None = None
     try:
         with BrowserEngine(config) as engine:
+            engine_ref = engine
             page = engine.current_page_or_new_page()
             while folder_queue:
                 folder_task = folder_queue.pop(0)
@@ -152,6 +226,8 @@ def download_current_folder(
                     continue
 
                 visited_destinations.add(folder_task.destination)
+                folders_processed += 1
+                current_folder = folder_task
                 ensure_destination_dir(folder_task.destination)
                 log_download_message(
                     f"Processing folder: {folder_task.url} -> {folder_task.destination} "
@@ -342,6 +418,21 @@ def download_current_folder(
                     )
                     manifest_writer.record_downloaded(downloaded_file)
     except Exception as error:
+        if isinstance(error, BrowserClosedError) and engine_ref is not None:
+            # The browser died mid-run: capture read-only diagnostics (CDP liveness,
+            # Chromium log tail, resource pressure) to help explain *why*, since the
+            # abort itself only says *that* it happened.
+            _capture_browser_crash_diagnostics(
+                engine=engine_ref,
+                downloads_dir=downloads_dir,
+                started_at=started_at,
+                run_started_monotonic=run_started_monotonic,
+                folders_processed=folders_processed,
+                current_folder=current_folder,
+                manifest_writer=manifest_writer,
+                progress_logger=progress_logger,
+                error=error,
+            )
         progress_logger.log("run_failed", reason=str(error))
         # Leave the partial journal on disk; do not publish a final manifest.
         manifest_writer.close()

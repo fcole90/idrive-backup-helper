@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import subprocess
@@ -5,6 +6,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 from types import TracebackType
+from typing import cast
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -114,6 +116,48 @@ class DetachedBrowserLaunch:
 
 
 @dataclass(frozen=True)
+class BrowserHealthReport:
+    """A read-only snapshot of the browser's liveness, taken after a mid-run death.
+
+    Gathered without touching Playwright (only an HTTP probe of the CDP endpoint,
+    a subprocess ``poll``, and a log read), so it is safe to collect once the page
+    or context is already gone. ``cdp_reachable`` is the key signal: True means only
+    our tab/page closed, False means the whole browser process is gone.
+    """
+
+    mode: str
+    cdp_url: str | None
+    cdp_reachable: bool | None
+    cdp_version: str | None
+    detached_pid: int | None
+    detached_exit_code: int | None
+    detached_running: bool | None
+    chromium_log_tail: str | None
+
+
+def _probe_cdp_version(
+    endpoint_url: str, *, timeout_seconds: float = 2.0
+) -> str | None:
+    version_url = endpoint_url.rstrip("/") + "/json/version"
+    try:
+        with urlopen(version_url, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except OSError, URLError, TimeoutError:
+        return None
+
+    try:
+        parsed: object = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip()[:200] or None
+
+    if isinstance(parsed, dict):
+        browser = cast(dict[object, object], parsed).get("Browser")
+        if isinstance(browser, str) and browser:
+            return browser
+    return raw.strip()[:200] or None
+
+
+@dataclass(frozen=True)
 class BrowserConfig:
     profile_dir: Path
     staging_dir: Path
@@ -129,6 +173,7 @@ class BrowserEngine:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._browser_context: BrowserContext | None = None
+        self._detached_launch: DetachedBrowserLaunch | None = None
 
     def __enter__(self) -> "BrowserEngine":
         self._config.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +220,47 @@ class BrowserEngine:
 
         self._playwright_context.__exit__(exc_type, exc, traceback)
 
+    def describe_browser_health(self) -> BrowserHealthReport:
+        # Read-only: an HTTP probe, a subprocess poll, and a log read — no Playwright
+        # calls — so this is safe to run after the page/context has already died.
+        cdp_url = self._config.browser_debug_url
+        launch = self._detached_launch
+
+        cdp_reachable: bool | None = None
+        cdp_version: str | None = None
+        if cdp_url is not None:
+            cdp_version = _probe_cdp_version(cdp_url)
+            cdp_reachable = cdp_version is not None
+
+        detached_pid = launch.process.pid if launch is not None else None
+        detached_exit_code: int | None = None
+        detached_running: bool | None = None
+        if launch is not None:
+            detached_exit_code = launch.process.poll()
+            detached_running = detached_exit_code is None
+
+        chromium_log_tail = (
+            _startup_log_summary(launch.log_path) if launch is not None else None
+        )
+
+        if cdp_url is None:
+            mode = "owned-context"
+        elif launch is not None:
+            mode = "launched-cdp"
+        else:
+            mode = "attached-cdp"
+
+        return BrowserHealthReport(
+            mode=mode,
+            cdp_url=cdp_url,
+            cdp_reachable=cdp_reachable,
+            cdp_version=cdp_version,
+            detached_pid=detached_pid,
+            detached_exit_code=detached_exit_code,
+            detached_running=detached_running,
+            chromium_log_tail=chromium_log_tail,
+        )
+
     def new_page(self) -> Page:
         if self._browser_context is None:
             raise RuntimeError("BrowserEngine must be entered before creating a page.")
@@ -215,6 +301,7 @@ class BrowserEngine:
                 f"({self._config.browser_debug_url}): {_first_error_line(error)}"
             )
             launch = self._launch_detached_browser(playwright)
+            self._detached_launch = launch
             _wait_for_cdp_endpoint(
                 self._config.browser_debug_url,
                 timeout_seconds=CDP_LAUNCH_TIMEOUT_SECONDS,

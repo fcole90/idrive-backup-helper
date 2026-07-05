@@ -12,6 +12,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import BrowserClosedError
 from idrive_backup_helper.browser.downloads.download_run import download_current_folder
+from idrive_backup_helper.browser.engine import BrowserHealthReport
 
 
 class FakeBrowserEngine:
@@ -32,6 +33,18 @@ class FakeBrowserEngine:
 
     def current_page_or_new_page(self) -> object:
         return self.page
+
+    def describe_browser_health(self) -> BrowserHealthReport:
+        return BrowserHealthReport(
+            mode="attached-cdp",
+            cdp_url="http://127.0.0.1:9222",
+            cdp_reachable=False,
+            cdp_version=None,
+            detached_pid=None,
+            detached_exit_code=None,
+            detached_running=None,
+            chromium_log_tail=None,
+        )
 
 
 def test_download_current_folder_loads_cached_folder_before_first_download(
@@ -323,6 +336,18 @@ def test_download_current_folder_aborts_when_browser_closed_mid_download(
     # Aborted on the first file rather than marching through the folder marking
     # every remaining (blameless) file as failed.
     assert attempted == ["already.txt"]
+
+    # A browser death writes a crash-diagnostics report next to the manifest.
+    crash_reports = list(downloads_dir.glob("download-folder-crash-*.md"))
+    assert len(crash_reports) == 1
+    report_text = crash_reports[0].read_text(encoding="utf-8")
+    assert "whole browser process is gone" in report_text
+    assert "browser was closed mid-download" in report_text
+    assert "Folders processed: 1" in report_text
+
+    progress_logs = list(downloads_dir.glob("download-folder-progress-*.ndjson"))
+    progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
+    assert "browser_crash_diagnostics" in progress_text
 
 
 def _read_manifest_records(manifest_path: Path) -> list[dict[str, object]]:

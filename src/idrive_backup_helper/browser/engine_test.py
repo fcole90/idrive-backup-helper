@@ -177,6 +177,69 @@ def test_browser_engine_reuses_current_page_without_opening_new_tab(
     assert context.new_page_calls == 0
 
 
+def _health_config(tmp_path: Path, browser_debug_url: str | None) -> BrowserConfig:
+    return BrowserConfig(
+        profile_dir=tmp_path / "profile",
+        staging_dir=tmp_path / "downloads",
+        headless=False,
+        timeout_ms=1234,
+        browser_debug_url=browser_debug_url,
+    )
+
+
+def test_describe_browser_health_classifies_reachable_cdp_as_tab_only_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_probe(url: str, **_: object) -> str | None:
+        return "Chrome/120.0" if url == "http://127.0.0.1:9222" else None
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.engine._probe_cdp_version", fake_probe
+    )
+
+    # Attached to an already-running browser (no owned detached process), and the
+    # CDP endpoint still answers -> only our tab/page closed.
+    engine = BrowserEngine(_health_config(tmp_path, "http://127.0.0.1:9222"))
+    health = engine.describe_browser_health()
+
+    assert health.mode == "attached-cdp"
+    assert health.cdp_reachable is True
+    assert health.cdp_version == "Chrome/120.0"
+    assert health.detached_pid is None
+    assert health.detached_running is None
+
+
+def test_describe_browser_health_classifies_unreachable_cdp_as_dead_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_probe(_url: str, **_: object) -> str | None:
+        return None
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.engine._probe_cdp_version", fake_probe
+    )
+
+    engine = BrowserEngine(_health_config(tmp_path, "http://127.0.0.1:9222"))
+    health = engine.describe_browser_health()
+
+    assert health.cdp_reachable is False
+    assert health.cdp_version is None
+
+
+def test_describe_browser_health_owned_context_has_no_cdp_probe(
+    tmp_path: Path,
+) -> None:
+    engine = BrowserEngine(_health_config(tmp_path, browser_debug_url=None))
+    health = engine.describe_browser_health()
+
+    assert health.mode == "owned-context"
+    assert health.cdp_url is None
+    assert health.cdp_reachable is None
+    assert health.chromium_log_tail is None
+
+
 def test_ensure_browser_executable_reports_setup_command_for_missing_browser(
     tmp_path: Path,
 ) -> None:
