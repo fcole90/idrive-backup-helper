@@ -824,15 +824,21 @@ def _looks_like_download_tab(url: str) -> bool:
     return DOWNLOAD_ARTIFACT_URL_MARKER in url
 
 
-def _close_leftover_download_tabs(
-    context: BrowserContext, pages_before: list[Page], *, keep: Page
-) -> None:
-    # Cleanup must never raise: a failure here would mask the real download error
-    # or crash an otherwise healthy run, so swallow everything and just log.
+def _close_leftover_download_tabs(context: BrowserContext, *, keep: Page) -> None:
+    # Reap EVERY download-artifact tab (except the crawl page), not just ones opened
+    # during the current download. A rejected path (INVALID PATH etc.) leaves a tab
+    # showing the JSON error; if it is not caught on this sweep (its URL may not have
+    # committed yet), it must still be reaped on a later one. The old "only new tabs"
+    # rule left such tabs stranded across downloads, so they accumulated over a long
+    # run and eventually destabilized the browser. A tab whose URL points at the
+    # download endpoint is always our artifact, never the user's own tab, so closing
+    # it regardless of when it opened is safe.
+    #
+    # Cleanup must never raise: a failure here would mask the real download error or
+    # crash an otherwise healthy run, so swallow everything and just log.
     try:
-        before_ids = {id(page) for page in pages_before}
         for tab in list(context.pages):
-            if tab is keep or id(tab) in before_ids:
+            if tab is keep:
                 continue
             # Never close the last remaining tab; doing so can quit an attached
             # browser out from under the run.
@@ -865,7 +871,6 @@ def download_one_file(
     _log(f"Starting download: {remote_file.file_name}")
 
     context = page.context
-    pages_before = list(context.pages)
 
     try:
         with page.expect_download(timeout=DOWNLOAD_START_TIMEOUT_MS) as download_info:
@@ -881,14 +886,14 @@ def download_one_file(
 
         download = download_info.value
     except PlaywrightTimeoutError as error:
-        _close_leftover_download_tabs(context, pages_before, keep=page)
+        _close_leftover_download_tabs(context, keep=page)
         raise RuntimeError(
             "Timed out waiting for browser download to start: "
             f"{remote_file.file_name}. IDrive may still have a stale or blocked "
             "download in progress from a previous interrupted run."
         ) from error
     except PlaywrightError as error:
-        _close_leftover_download_tabs(context, pages_before, keep=page)
+        _close_leftover_download_tabs(context, keep=page)
         if _page_is_closed(page):
             raise BrowserClosedError(
                 "Browser was closed mid-download while downloading "
@@ -900,19 +905,19 @@ def download_one_file(
     except Exception:
         # A trigger failure (e.g. the file row was never found) usually leaves no
         # download tab open, but close defensively so no stray tab survives.
-        _close_leftover_download_tabs(context, pages_before, keep=page)
+        _close_leftover_download_tabs(context, keep=page)
         raise
 
     failure = download.failure()
     if failure is not None:
-        _close_leftover_download_tabs(context, pages_before, keep=page)
+        _close_leftover_download_tabs(context, keep=page)
         raise RuntimeError(f"Download failed: {remote_file.file_name} ({failure})")
 
     # Stage first: _stage_download_on_volume blocks on download.path() until the
     # artifact is fully written, so the download-carrying tab is done by the time
     # we sweep any leftover tabs.
     staged_path = _stage_download_on_volume(download, staging_dir, remote_file)
-    _close_leftover_download_tabs(context, pages_before, keep=page)
+    _close_leftover_download_tabs(context, keep=page)
     _log(f"Staged download complete: {remote_file.file_name} -> {staged_path}")
     return staged_path
 

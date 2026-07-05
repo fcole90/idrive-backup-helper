@@ -971,6 +971,28 @@ def test_download_one_file_closes_leftover_error_tab_on_timeout(
     assert unrelated_tab.closed is False
 
 
+def test_download_one_file_reaps_error_tab_left_from_a_previous_download(
+    tmp_path: Path,
+) -> None:
+    # An INVALID PATH error tab stranded by an EARLIER download is already present
+    # before this one starts (so it is not a "new" tab). It must still be reaped, or
+    # such tabs accumulate across a long run and eventually destabilize the browser.
+    stale_error_tab = FakeTab(
+        "https://evsweb5505.idrive.com/evs/v1/downloadFile?version=0&p=%2Ffoo.dll"
+    )
+    page = FakeDownloadTimeoutPage(existing_tabs=[stale_error_tab])
+
+    with pytest.raises(RuntimeError, match="stale or blocked download"):
+        download_one_file(
+            cast(Page, page),
+            remote_file=_remote_file("bar.dll"),
+            staging_dir=tmp_path,
+            cooldown_ms=1500,
+        )
+
+    assert stale_error_tab.closed is True
+
+
 def test_download_one_file_fails_fast_when_trigger_reports_missing_row(
     tmp_path: Path,
 ) -> None:
