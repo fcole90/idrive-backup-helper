@@ -21,6 +21,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
     SkippedFile,
 )
 from idrive_backup_helper.browser.downloads.download_page import (
+    BrowserClosedError,
     ensure_folder_loaded_for_download,
     load_folder_entries_with_retry,
 )
@@ -308,6 +309,11 @@ def download_current_folder(
                             "Moved download to destination: "
                             f"{downloaded_file.final_path}"
                         )
+                    except BrowserClosedError:
+                        # The browser is gone: this file is blameless, and every
+                        # remaining file would "fail" the same way. Abort so the
+                        # run stops cleanly and resumes from the journal instead.
+                        raise
                     except (OSError, RuntimeError) as error:
                         log_download_message(
                             f"Failed file download: {remote_file.file_name} ({error})"

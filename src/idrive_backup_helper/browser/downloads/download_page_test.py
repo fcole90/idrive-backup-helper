@@ -17,6 +17,8 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import (
     DOWNLOAD_START_TIMEOUT_MS,
+    RETRY_SLEEP_SLICE_SECONDS,
+    BrowserClosedError,
     NavigationPlan,
     SelectorState,
     plan_breadcrumb_navigation,
@@ -410,6 +412,117 @@ def test_load_folder_entries_navigates_when_current_url_differs(
 
     assert clicked_urls == [target_url]
     assert page.navigated_urls == []
+
+
+def test_load_folder_entries_retry_sleep_is_chunked_while_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The 10s backoff is slept as 1s slices, not one blocking wait, so the
+    # cooperatively-scheduled Playwright loop is never frozen for the whole wait.
+    attempts = {"count": 0}
+
+    def fake_load_folder_with_retry(*args: object, **kwargs: object) -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PlaywrightError("transient folder load failure")
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._load_folder_with_retry",
+        fake_load_folder_with_retry,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._evaluate_current_folder_entries",
+        _fake_evaluate_current_folder_entries,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.write_folder_entries_cache",
+        _fake_write_folder_entries_cache,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        slept.append,
+    )
+
+    load_folder_entries_with_retry(
+        cast(Page, FakeOpenPage()),
+        downloads_dir=tmp_path,
+        target_url="https://www.idrive.com/idrive/home/device/F/folder",
+        timeout_ms=60_000,
+        allow_interactive_login=True,
+        expected_folder_name=None,
+        use_folder_cache=False,
+    )
+
+    assert slept == [RETRY_SLEEP_SLICE_SECONDS] * 10
+
+
+def test_load_folder_entries_retry_sleep_stops_early_when_page_closes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The page is alive at the post-failure abort check but closes during the
+    # backoff: the sliced sleep bails after one slice, then the next attempt's
+    # abort check turns the closed page into a clean BrowserClosedError.
+    def fake_load_folder_with_retry(*args: object, **kwargs: object) -> None:
+        raise PlaywrightError("Target page, context or browser has been closed")
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._load_folder_with_retry",
+        fake_load_folder_with_retry,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        slept.append,
+    )
+
+    with pytest.raises(BrowserClosedError):
+        load_folder_entries_with_retry(
+            cast(Page, FakeClosesDuringSleepPage()),
+            downloads_dir=tmp_path,
+            target_url="https://www.idrive.com/idrive/home/device/F/folder",
+            timeout_ms=60_000,
+            allow_interactive_login=True,
+            expected_folder_name=None,
+            use_folder_cache=False,
+        )
+
+    assert slept == [RETRY_SLEEP_SLICE_SECONDS]
+
+
+def test_load_folder_entries_aborts_without_retry_when_browser_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A closed page never recovers: abort with a clear error instead of throwing
+    # a raw TargetClosedError from the retry sleep or looping for the full window.
+    def fake_load_folder_with_retry(*args: object, **kwargs: object) -> None:
+        raise PlaywrightError("Target page, context or browser has been closed")
+
+    def boom_sleep(_seconds: float) -> None:
+        raise AssertionError("must not sleep-retry a closed browser")
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._load_folder_with_retry",
+        fake_load_folder_with_retry,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        boom_sleep,
+    )
+
+    with pytest.raises(RuntimeError, match="Browser was closed mid-run"):
+        load_folder_entries_with_retry(
+            cast(Page, FakeClosedPage()),
+            downloads_dir=tmp_path,
+            target_url="https://www.idrive.com/idrive/home/device/F/folder",
+            timeout_ms=60_000,
+            allow_interactive_login=True,
+            expected_folder_name=None,
+            use_folder_cache=False,
+        )
 
 
 def test_is_current_folder_url_normalizes_encoding_and_trailing_slash() -> None:
@@ -967,6 +1080,31 @@ class FakeLoadPage:
 
     def wait_for_timeout(self, timeout: float) -> None:
         pass
+
+
+class FakeClosedPage:
+    def __init__(self) -> None:
+        self.url = "https://www.idrive.com/idrive/home/device/F/folder"
+
+    def is_closed(self) -> bool:
+        return True
+
+
+class FakeOpenPage:
+    def is_closed(self) -> bool:
+        return False
+
+
+class FakeClosesDuringSleepPage:
+    # Reports open on the first is_closed() call (the post-failure abort check),
+    # then closed on every later call (during the sliced backoff and after).
+    def __init__(self) -> None:
+        self.url = "https://www.idrive.com/idrive/home/device/F/folder"
+        self._checks = 0
+
+    def is_closed(self) -> bool:
+        self._checks += 1
+        return self._checks > 1
 
 
 def _fake_ensure_authenticated_page(

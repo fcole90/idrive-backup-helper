@@ -54,6 +54,10 @@ FOLDER_SETTLE_EMPTY_CONFIRM_CHECKS = 2
 FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
+# Backoff between retries is slept in short slices (page-independent time.sleep)
+# so a mid-wait browser close is noticed promptly and the cooperatively-scheduled
+# Playwright event loop is not frozen for the whole interval.
+RETRY_SLEEP_SLICE_SECONDS = 1.0
 DOWNLOAD_START_TIMEOUT_MS = 60_000
 # IDrive opens the file download in a throwaway tab. A successful download turns
 # the response into an attachment and the tab auto-closes; a rejected path
@@ -620,6 +624,48 @@ def navigate_to_folder_with_clicks(
         page.wait_for_timeout(_human_delay_ms())
 
 
+class BrowserClosedError(RuntimeError):
+    """The browser page/context is gone; the run cannot continue and must abort.
+
+    Distinct from a per-file failure so callers re-raise it instead of recording
+    the (blameless) file as failed and marching on through a dead browser.
+    """
+
+
+def _page_is_closed(page: Page) -> bool:
+    try:
+        return page.is_closed()
+    except Exception:
+        # A torn-down connection means the target is gone for our purposes.
+        return True
+
+
+def _abort_if_browser_closed(page: Page, last_error: Exception) -> None:
+    # A closed page/context never recovers, so retrying for the full timeout
+    # window is pointless and the page-based retry sleep would itself throw
+    # TargetClosedError. Fail fast with an actionable message instead.
+    if not _page_is_closed(page):
+        return
+    raise BrowserClosedError(
+        "Browser was closed mid-run (the tab or window was closed, or the "
+        "browser crashed/exited), so folder loading cannot continue. Aborting; "
+        f"the partial run journal is preserved. Last error: {last_error}"
+    ) from last_error
+
+
+def _sleep_before_retry(page: Page, interval_ms: int) -> None:
+    # Sleep in short slices instead of one long block. time.sleep never touches
+    # the page, so the wait itself cannot raise TargetClosedError; slicing keeps
+    # the (cooperatively-scheduled) event loop from being frozen for the whole
+    # interval and lets us bail the moment the browser goes away.
+    remaining_seconds = interval_ms / 1000
+    while remaining_seconds > 0:
+        time.sleep(min(RETRY_SLEEP_SLICE_SECONDS, remaining_seconds))
+        remaining_seconds -= RETRY_SLEEP_SLICE_SECONDS
+        if _page_is_closed(page):
+            return
+
+
 def _load_folder_with_retry(
     page: Page,
     *,
@@ -662,6 +708,8 @@ def _load_folder_with_retry(
             last_error = error
             _log(f"Folder load attempt {attempt} failed: {error}")
 
+        _abort_if_browser_closed(page, last_error)
+
         if time.monotonic() >= deadline:
             break
 
@@ -669,7 +717,7 @@ def _load_folder_with_retry(
         _log(
             f"Retrying folder load in {FOLDER_LOAD_RETRY_INTERVAL_MS // 1000}s: {target_url}"
         )
-        page.wait_for_timeout(FOLDER_LOAD_RETRY_INTERVAL_MS)
+        _sleep_before_retry(page, FOLDER_LOAD_RETRY_INTERVAL_MS)
 
     raise RuntimeError(
         "Failed to load folder after retries "
@@ -734,6 +782,8 @@ def load_folder_entries_with_retry(
             last_error = error
             _log(f"Folder entries attempt {attempt} failed: {error}")
 
+        _abort_if_browser_closed(page, last_error)
+
         if time.monotonic() >= deadline:
             break
 
@@ -741,7 +791,7 @@ def load_folder_entries_with_retry(
         _log(
             f"Retrying folder entries in {FOLDER_LOAD_RETRY_INTERVAL_MS // 1000}s: {target_url}"
         )
-        page.wait_for_timeout(FOLDER_LOAD_RETRY_INTERVAL_MS)
+        _sleep_before_retry(page, FOLDER_LOAD_RETRY_INTERVAL_MS)
 
     raise RuntimeError(
         "Failed to extract folder entries after retries "
@@ -767,31 +817,42 @@ def ensure_folder_loaded_for_download(
 
 
 def _looks_like_download_tab(url: str) -> bool:
-    # A tab still sitting on about:blank never navigated to a real page, so it is
-    # a spent download popup; otherwise only treat the download endpoint as ours.
-    return not url or url == "about:blank" or DOWNLOAD_ARTIFACT_URL_MARKER in url
+    # Deliberately narrow: only reap tabs that clearly point at the download
+    # endpoint (a lingering error page such as {"desc":"INVALID PATH"}). Never
+    # touch about:blank or unknown tabs — in an attached real browser those may be
+    # the user's own, and closing the wrong one can take the run's page down.
+    return DOWNLOAD_ARTIFACT_URL_MARKER in url
 
 
 def _close_leftover_download_tabs(
     context: BrowserContext, pages_before: list[Page], *, keep: Page
 ) -> None:
-    before_ids = {id(page) for page in pages_before}
-    for tab in list(context.pages):
-        if tab is keep or id(tab) in before_ids:
-            continue
-        try:
-            if tab.is_closed():
+    # Cleanup must never raise: a failure here would mask the real download error
+    # or crash an otherwise healthy run, so swallow everything and just log.
+    try:
+        before_ids = {id(page) for page in pages_before}
+        for tab in list(context.pages):
+            if tab is keep or id(tab) in before_ids:
                 continue
-            url = tab.url
-        except PlaywrightError:
-            url = ""
-        if not _looks_like_download_tab(url):
-            continue
-        try:
-            tab.close()
-            _log(f"Closed leftover download tab: {url or '<blank>'}")
-        except PlaywrightError as error:
-            _log(f"Failed to close leftover download tab ({url or '<blank>'}): {error}")
+            # Never close the last remaining tab; doing so can quit an attached
+            # browser out from under the run.
+            if len(context.pages) <= 1:
+                break
+            try:
+                if tab.is_closed():
+                    continue
+                url = tab.url
+            except PlaywrightError:
+                continue
+            if not _looks_like_download_tab(url):
+                continue
+            try:
+                tab.close()
+                _log(f"Closed leftover download tab: {url}")
+            except PlaywrightError as error:
+                _log(f"Failed to close leftover download tab ({url}): {error}")
+    except Exception as error:
+        _log(f"Skipped leftover download tab cleanup: {error}")
 
 
 def download_one_file(
@@ -828,6 +889,11 @@ def download_one_file(
         ) from error
     except PlaywrightError as error:
         _close_leftover_download_tabs(context, pages_before, keep=page)
+        if _page_is_closed(page):
+            raise BrowserClosedError(
+                "Browser was closed mid-download while downloading "
+                f"{remote_file.file_name}; aborting the run."
+            ) from error
         raise RuntimeError(
             f"Download canceled by browser/session: {remote_file.file_name} ({error})"
         ) from error

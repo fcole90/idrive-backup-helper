@@ -10,6 +10,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
     RemoteEntries,
     RemoteFile,
 )
+from idrive_backup_helper.browser.downloads.download_page import BrowserClosedError
 from idrive_backup_helper.browser.downloads.download_run import download_current_folder
 
 
@@ -261,6 +262,67 @@ def test_download_current_folder_redownloads_when_resume_success_file_missing(
     # even though the resume log marks them as previously successful.
     assert sorted(transferred) == ["already.txt", "needed.txt"]
     assert report.counts.skipped == 0
+
+
+def test_download_current_folder_aborts_when_browser_closed_mid_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    folder_url = "https://example.com/folder"
+    attempted: list[str] = []
+
+    def fake_transfer_raises_browser_closed(
+        *,
+        page: object,
+        remote_file: RemoteFile,
+        staging_dir: Path,
+        destination_dir: Path,
+        replace_existing: bool,
+        cooldown_ms: int,
+    ) -> DownloadedFile:
+        attempted.append(remote_file.file_name)
+        raise BrowserClosedError("browser was closed mid-download")
+
+    monkeypatch.setattr(download_run, "BrowserEngine", FakeBrowserEngine)
+    monkeypatch.setattr(
+        download_run,
+        "load_folder_entries_with_retry",
+        _fake_load_folder_entries_with_retry,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "ensure_folder_loaded_for_download",
+        _fake_ensure_folder_loaded_for_download,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "transfer_remote_file_to_destination",
+        fake_transfer_raises_browser_closed,
+    )
+
+    with pytest.raises(BrowserClosedError):
+        download_current_folder(
+            profile_dir=profile_dir,
+            downloads_dir=downloads_dir,
+            url=folder_url,
+            destination=destination,
+            headless=False,
+            timeout_ms=60_000,
+            cooldown_ms=1500,
+            overwrite="replace",
+            use_folder_cache=True,
+            resume_from_logs=False,
+        )
+
+    # Aborted on the first file rather than marching through the folder marking
+    # every remaining (blameless) file as failed.
+    assert attempted == ["already.txt"]
 
 
 def _read_manifest_records(manifest_path: Path) -> list[dict[str, object]]:
