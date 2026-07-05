@@ -1,5 +1,8 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
 import psutil
 
@@ -11,16 +14,19 @@ _PROC_GONE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 @dataclass(frozen=True)
 class ResourceSnapshot:
-    """Memory/handle usage of *this* process plus system-wide memory pressure.
+    """Memory/handle usage of this process, the browser tree, and the system.
 
-    Captured at the moment the browser dies so a crash report can be correlated
-    with the confirmed ~35 MB/hr heap climb and the suspected low-memory freeze.
+    Captured at the moment the browser dies (and per folder as telemetry) so a
+    crash can be correlated with renderer heap growth and system memory pressure
+    — the confirmed cause class of the 2026-07-05 tab death.
     """
 
     process_rss_mb: float
     process_uss_mb: float | None
     process_handles: int | None
     process_threads: int | None
+    browser_rss_mb: float | None
+    browser_process_count: int | None
     system_available_mb: float
     system_used_percent: float
 
@@ -49,7 +55,69 @@ def _process_handles(proc: psutil.Process) -> int | None:
         return None
 
 
-def capture_resource_snapshot() -> ResourceSnapshot | None:
+def browser_cmdline_markers(
+    profile_dir: Path, browser_debug_url: str | None
+) -> list[str]:
+    """Chrome-specific cmdline substrings identifying the run's browser processes.
+
+    ``--user-data-dir`` matches an owned or self-launched browser;
+    ``--remote-debugging-port`` matches an externally launched attached browser
+    that may use a different profile. Both are Chrome switches, so our own Python
+    process can never match.
+    """
+    markers = [f"--user-data-dir={profile_dir}"]
+    if browser_debug_url is not None:
+        port = urlparse(browser_debug_url).port
+        if port is not None:
+            markers.append(f"--remote-debugging-port={port}")
+    return markers
+
+
+def _browser_tree_memory(
+    cmdline_markers: Sequence[str],
+) -> tuple[float, int] | None:
+    """Sum RSS over browser processes matched by cmdline marker, plus descendants.
+
+    Markers are Chrome-specific switches (``--user-data-dir=…``,
+    ``--remote-debugging-port=…``) so our own Python process never matches. Roots
+    are matched by cmdline; children are collected recursively because not every
+    Chrome child process repeats the switches.
+    """
+    if not cmdline_markers:
+        return None
+
+    roots: list[psutil.Process] = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        cmdline = " ".join(proc.info.get("cmdline") or [])
+        if cmdline and any(marker in cmdline for marker in cmdline_markers):
+            roots.append(proc)
+
+    tree_by_pid: dict[int, psutil.Process] = {}
+    for root in roots:
+        tree_by_pid[root.pid] = root
+        try:
+            for child in root.children(recursive=True):
+                tree_by_pid[child.pid] = child
+        except _PROC_GONE:
+            continue
+
+    total_rss = 0
+    counted = 0
+    for proc in tree_by_pid.values():
+        try:
+            total_rss += proc.memory_info().rss
+        except _PROC_GONE:
+            continue
+        counted += 1
+
+    if counted == 0:
+        return None
+    return total_rss / _MB, counted
+
+
+def capture_resource_snapshot(
+    browser_cmdline_markers: Sequence[str] = (),
+) -> ResourceSnapshot | None:
     # Best-effort: a failure here must never mask the browser-death it describes.
     try:
         proc = psutil.Process()
@@ -62,12 +130,18 @@ def capture_resource_snapshot() -> ResourceSnapshot | None:
             threads: int | None = proc.num_threads()
         except _PROC_GONE:
             threads = None
+        try:
+            browser_memory = _browser_tree_memory(browser_cmdline_markers)
+        except Exception:
+            browser_memory = None
         virtual = psutil.virtual_memory()
         return ResourceSnapshot(
             process_rss_mb=mem.rss / _MB,
             process_uss_mb=uss_mb,
             process_handles=_process_handles(proc),
             process_threads=threads,
+            browser_rss_mb=browser_memory[0] if browser_memory else None,
+            browser_process_count=browser_memory[1] if browser_memory else None,
             system_available_mb=virtual.available / _MB,
             system_used_percent=virtual.percent,
         )
@@ -80,6 +154,10 @@ def _format_mb(value: float | None) -> str:
 
 
 def _format_int(value: int | None) -> str:
+    return str(value) if value is not None else "unknown"
+
+
+def _format_flag(value: bool | None) -> str:
     return str(value) if value is not None else "unknown"
 
 
@@ -135,10 +213,10 @@ def render_crash_report(
         "",
         f"- Mode: {health.mode}",
         f"- CDP URL: {health.cdp_url or 'n/a'}",
-        f"- CDP reachable: {health.cdp_reachable}",
+        f"- CDP reachable: {_format_flag(health.cdp_reachable)}",
         f"- CDP version: {health.cdp_version or 'n/a'}",
         f"- Detached PID: {_format_int(health.detached_pid)}",
-        f"- Detached still running: {health.detached_running}",
+        f"- Detached still running: {_format_flag(health.detached_running)}",
         f"- Detached exit code: {_format_int(health.detached_exit_code)}",
         "",
         "## Resources at death",
@@ -153,6 +231,8 @@ def render_crash_report(
                 f"- Process USS: {_format_mb(resources.process_uss_mb)}",
                 f"- Process handles/fds: {_format_int(resources.process_handles)}",
                 f"- Process threads: {_format_int(resources.process_threads)}",
+                f"- Browser tree RSS: {_format_mb(resources.browser_rss_mb)} "
+                f"({_format_int(resources.browser_process_count)} process(es))",
                 f"- System memory available: "
                 f"{_format_mb(resources.system_available_mb)}",
                 f"- System memory used: {resources.system_used_percent:.1f}%",

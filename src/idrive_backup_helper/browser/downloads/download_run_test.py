@@ -9,9 +9,13 @@ from idrive_backup_helper.browser.downloads.download_models import (
     DownloadedFile,
     RemoteEntries,
     RemoteFile,
+    RemoteFolder,
 )
 from idrive_backup_helper.browser.downloads.download_page import BrowserClosedError
-from idrive_backup_helper.browser.downloads.download_run import download_current_folder
+from idrive_backup_helper.browser.downloads.download_run import (
+    TAB_DEATH_RECOVERY_LIMIT,
+    download_current_folder,
+)
 from idrive_backup_helper.browser.engine import BrowserHealthReport
 
 
@@ -19,6 +23,7 @@ class FakeBrowserEngine:
     def __init__(self, config: object) -> None:
         self.config = config
         self.page = object()
+        self.new_page_calls = 0
 
     def __enter__(self) -> "FakeBrowserEngine":
         return self
@@ -33,6 +38,11 @@ class FakeBrowserEngine:
 
     def current_page_or_new_page(self) -> object:
         return self.page
+
+    def new_page(self) -> object:
+        # The browser is "alive": reopening a page after a tab death succeeds.
+        self.new_page_calls += 1
+        return object()
 
     def describe_browser_health(self) -> BrowserHealthReport:
         return BrowserHealthReport(
@@ -277,7 +287,7 @@ def test_download_current_folder_redownloads_when_resume_success_file_missing(
     assert report.counts.skipped == 0
 
 
-def test_download_current_folder_aborts_when_browser_closed_mid_download(
+def test_download_current_folder_aborts_after_tab_death_recovery_budget_exhausted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -333,21 +343,186 @@ def test_download_current_folder_aborts_when_browser_closed_mid_download(
             resume_from_logs=False,
         )
 
-    # Aborted on the first file rather than marching through the folder marking
-    # every remaining (blameless) file as failed.
-    assert attempted == ["already.txt"]
+    # Each death aborts the folder on the first file (never marching through the
+    # rest), the folder is retried on a fresh page, and once the recovery budget
+    # is spent the run aborts: one attempt per death.
+    assert attempted == ["already.txt"] * (TAB_DEATH_RECOVERY_LIMIT + 1)
 
-    # A browser death writes a crash-diagnostics report next to the manifest.
+    # Every tab death writes its own crash-diagnostics report.
     crash_reports = list(downloads_dir.glob("download-folder-crash-*.md"))
-    assert len(crash_reports) == 1
+    assert len(crash_reports) == TAB_DEATH_RECOVERY_LIMIT + 1
     report_text = crash_reports[0].read_text(encoding="utf-8")
     assert "whole browser process is gone" in report_text
     assert "browser was closed mid-download" in report_text
-    assert "Folders processed: 1" in report_text
 
     progress_logs = list(downloads_dir.glob("download-folder-progress-*.ndjson"))
     progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
     assert "browser_crash_diagnostics" in progress_text
+    assert progress_text.count('"tab_death_recovered"') == TAB_DEATH_RECOVERY_LIMIT
+
+
+def test_download_current_folder_recovers_from_one_tab_death(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    folder_url = "https://example.com/folder"
+    load_calls = {"count": 0}
+
+    def flaky_load_folder_entries_with_retry(
+        page: object,
+        *,
+        downloads_dir: Path,
+        target_url: str,
+        timeout_ms: int,
+        allow_interactive_login: bool,
+        expected_folder_name: str | None,
+        use_folder_cache: bool,
+    ) -> RemoteEntries:
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            # First attempt: the tab's renderer dies (browser still alive).
+            raise BrowserClosedError("tab renderer died mid-listing")
+        return _fake_load_folder_entries_with_retry(
+            page,
+            downloads_dir=downloads_dir,
+            target_url=target_url,
+            timeout_ms=timeout_ms,
+            allow_interactive_login=allow_interactive_login,
+            expected_folder_name=expected_folder_name,
+            use_folder_cache=use_folder_cache,
+        )
+
+    monkeypatch.setattr(download_run, "BrowserEngine", FakeBrowserEngine)
+    monkeypatch.setattr(
+        download_run,
+        "load_folder_entries_with_retry",
+        flaky_load_folder_entries_with_retry,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "ensure_folder_loaded_for_download",
+        _fake_ensure_folder_loaded_for_download,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "transfer_remote_file_to_destination",
+        _fake_transfer_remote_file_to_destination,
+    )
+
+    report = download_current_folder(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        url=folder_url,
+        destination=destination,
+        headless=False,
+        timeout_ms=60_000,
+        cooldown_ms=1500,
+        overwrite="replace",
+        use_folder_cache=True,
+        resume_from_logs=False,
+    )
+
+    # The folder was retried on a fresh page and the run finished normally.
+    assert load_calls["count"] == 2
+    assert report.counts.downloaded == 2
+    assert report.counts.failed == 0
+
+    crash_reports = list(downloads_dir.glob("download-folder-crash-*.md"))
+    assert len(crash_reports) == 1
+
+    progress_logs = list(downloads_dir.glob("download-folder-progress-*.ndjson"))
+    progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
+    assert '"tab_death_recovered"' in progress_text
+    assert '"run_finished"' in progress_text
+    # Per-folder memory telemetry lands in the progress log.
+    assert '"resource_sample"' in progress_text
+
+
+class FakeRecyclablePage:
+    def __init__(self) -> None:
+        self.goto_calls: list[str] = []
+
+    def goto(self, url: str, wait_until: str | None = None) -> None:
+        self.goto_calls.append(url)
+
+
+_recycling_engines: list["FakeRecyclingBrowserEngine"] = []
+
+
+class FakeRecyclingBrowserEngine(FakeBrowserEngine):
+    def __init__(self, config: object) -> None:
+        super().__init__(config)
+        self.page = FakeRecyclablePage()
+        _recycling_engines.append(self)
+
+
+def test_download_current_folder_recycles_renderer_between_folders(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    folder_url = "https://www.idrive.com/idrive/home/DEVICE_12345678/F/root"
+    child_url = "https://www.idrive.com/idrive/home/DEVICE_12345678/F/root/child"
+    load_calls = {"count": 0}
+
+    def stateful_load_folder_entries_with_retry(
+        page: object,
+        *,
+        downloads_dir: Path,
+        target_url: str,
+        timeout_ms: int,
+        allow_interactive_login: bool,
+        expected_folder_name: str | None,
+        use_folder_cache: bool,
+    ) -> RemoteEntries:
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            return RemoteEntries(
+                files=[],
+                folders=[RemoteFolder(folder_name="child", href=child_url)],
+            )
+        return RemoteEntries(files=[], folders=[])
+
+    _recycling_engines.clear()
+    monkeypatch.setattr(download_run, "PAGE_RECYCLE_FOLDER_INTERVAL", 1)
+    monkeypatch.setattr(download_run, "BrowserEngine", FakeRecyclingBrowserEngine)
+    monkeypatch.setattr(
+        download_run,
+        "load_folder_entries_with_retry",
+        stateful_load_folder_entries_with_retry,
+    )
+
+    download_current_folder(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        url=folder_url,
+        destination=destination,
+        headless=False,
+        timeout_ms=60_000,
+        cooldown_ms=1500,
+        overwrite="skip",
+        use_folder_cache=True,
+        resume_from_logs=False,
+    )
+
+    # Before the second folder the SPA got a hard reset back to IDrive home.
+    progress_logs = list(downloads_dir.glob("download-folder-progress-*.ndjson"))
+    progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
+    assert '"page_recycled"' in progress_text
+    assert len(_recycling_engines) == 1
+    page = _recycling_engines[0].page
+    assert page.goto_calls == ["https://www.idrive.com/idrive/home"]
 
 
 def _read_manifest_records(manifest_path: Path) -> list[dict[str, object]]:

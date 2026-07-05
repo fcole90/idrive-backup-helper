@@ -149,7 +149,7 @@ def idrive_folder_path_parts(url: str) -> list[str]:
     return path_parts[2:]
 
 
-def _idrive_home_url(url: str) -> str:
+def idrive_home_url(url: str) -> str:
     parsed_url = urlparse(url)
     return urlunparse(
         (
@@ -579,7 +579,7 @@ def navigate_to_folder_with_clicks(
     start_index = plan.start_index
 
     if plan.action == "go_home":
-        home_url = _idrive_home_url(target_url)
+        home_url = idrive_home_url(target_url)
         if is_current_folder_url(page.url, home_url):
             _log(f"Current tab is already at IDrive home: {home_url}")
         else:

@@ -1,8 +1,11 @@
 from datetime import datetime
+from pathlib import Path
+import sys
 
 from idrive_backup_helper.browser.downloads.download_diagnostics import (
     BrowserCrashContext,
     ResourceSnapshot,
+    browser_cmdline_markers,
     capture_resource_snapshot,
     render_crash_report,
 )
@@ -29,6 +32,8 @@ def _resources() -> ResourceSnapshot:
         process_uss_mb=480.25,
         process_handles=350,
         process_threads=12,
+        browser_rss_mb=4096.0,
+        browser_process_count=18,
         system_available_mb=128.0,
         system_used_percent=94.0,
     )
@@ -56,6 +61,7 @@ def test_render_crash_report_flags_dead_browser_when_cdp_unreachable() -> None:
     assert "whole browser process is gone" in report
     assert "Folders processed: 42" in report
     assert "Downloaded: 930" in report
+    assert "Browser tree RSS: 4096.0 MB (18 process(es))" in report
     assert "System memory available: 128.0 MB" in report
     assert "(no Chromium log captured for this browser)" in report
 
@@ -91,3 +97,33 @@ def test_capture_resource_snapshot_reports_this_process_memory() -> None:
     assert snapshot.process_rss_mb > 0
     assert snapshot.system_available_mb > 0
     assert 0 <= snapshot.system_used_percent <= 100
+    # No browser markers given: no browser tree to measure.
+    assert snapshot.browser_rss_mb is None
+    assert snapshot.browser_process_count is None
+
+
+def test_capture_resource_snapshot_measures_marker_matched_process_tree() -> None:
+    # Use our own interpreter path as the marker: this process always matches,
+    # proving the cmdline scan + tree RSS aggregation works end to end.
+    snapshot = capture_resource_snapshot([sys.executable])
+
+    assert snapshot is not None
+    assert snapshot.browser_rss_mb is not None
+    assert snapshot.browser_rss_mb > 0
+    assert snapshot.browser_process_count is not None
+    assert snapshot.browser_process_count >= 1
+
+
+def test_browser_cmdline_markers_are_chrome_specific_switches() -> None:
+    markers = browser_cmdline_markers(Path("/data/profile"), "http://127.0.0.1:9222")
+
+    assert markers == [
+        "--user-data-dir=/data/profile",
+        "--remote-debugging-port=9222",
+    ]
+
+
+def test_browser_cmdline_markers_without_debug_url_only_match_profile() -> None:
+    markers = browser_cmdline_markers(Path("/data/profile"), None)
+
+    assert markers == ["--user-data-dir=/data/profile"]
