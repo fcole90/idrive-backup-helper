@@ -60,6 +60,15 @@ FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
 # the backend will not open right now.
 FOLDER_UNAVAILABLE_RETRY_LIMIT = 3
 FOLDER_UNAVAILABLE_RETRY_INTERVAL_MS = 3_000
+# When a folder click did not land on the target (the breadcrumb is still
+# elsewhere), the outcome is not yet decided: IDrive may render its error banner a
+# beat late, or the folder may simply finish loading a beat late. Poll briefly for
+# either signal before treating it as an ordinary load miss. Sampling once raced the
+# banner when the parent was already loaded — the view then "settles" instantly, so
+# a single check looked before IDrive had rendered the banner. Only paid on folders
+# that did not settle onto the target; a healthy folder matches on the first read.
+FOLDER_OUTCOME_POLL_MS = 5_000
+FOLDER_OUTCOME_POLL_INTERVAL_MS = 500
 # Backoff between retries is slept in short slices (page-independent time.sleep)
 # so a mid-wait browser close is noticed promptly and the cooperatively-scheduled
 # Playwright event loop is not frozen for the whole interval.
@@ -364,23 +373,39 @@ def _ensure_expected_folder_loaded(
     if expected_folder_name is None:
         return
 
-    breadcrumb_titles = _read_breadcrumb_titles(page)
-    if expected_folder_name in breadcrumb_titles:
-        return
+    # The target may not have committed yet at the instant we get here (the parent
+    # view can "settle" immediately when it was already loaded). Poll for whichever
+    # resolves first: the breadcrumb reaching the target (a slightly late load) or
+    # IDrive's error banner (a folder it refuses to open, possibly rendered a beat
+    # after the click script's short poll already returned). A healthy folder is
+    # already there on the first read and returns without waiting.
+    deadline = time.monotonic() + (FOLDER_OUTCOME_POLL_MS / 1000)
+    breadcrumb_titles: list[str] = []
+    while True:
+        breadcrumb_titles = _read_breadcrumb_titles(page)
+        if expected_folder_name in breadcrumb_titles:
+            return
 
-    # The target folder never loaded. If IDrive's error banner is up, this is a
-    # folder it refuses to open, not a transient load — skip it quickly instead of
-    # retrying for the full window. This also catches the case where the click
-    # script's own post-click poll missed the banner (its window is short; the
-    # banner lingers ~10s, so it is still visible once the stale parent view has
-    # "settled" and we get here).
-    banner_text = _read_error_banner_text(page)
-    if banner_text is not None:
-        raise FolderUnavailableError(
-            f"IDrive refused to open folder '{expected_folder_name}': {banner_text}"
-        )
+        banner_text = _read_error_banner_text(page)
+        if banner_text is not None:
+            raise FolderUnavailableError(
+                f"IDrive refused to open folder '{expected_folder_name}': {banner_text}"
+            )
 
+        if time.monotonic() >= deadline:
+            break
+        page.wait_for_timeout(FOLDER_OUTCOME_POLL_INTERVAL_MS)
+
+    # Neither the folder nor the banner appeared within the window: treat as an
+    # ordinary (retryable) load miss. Log the tab URL and breadcrumb so a recurring
+    # miss can be diagnosed (e.g. whether the URL moved to the target while the view
+    # stayed on the parent, or the banner simply never rendered).
     joined_titles = "/".join(breadcrumb_titles) if breadcrumb_titles else "<empty>"
+    _log(
+        f"Folder '{expected_folder_name}' did not load and no error banner appeared "
+        f"within {FOLDER_OUTCOME_POLL_MS // 1000}s. Tab URL: {page.url}; "
+        f"breadcrumb: {joined_titles}"
+    )
     raise RuntimeError(
         "Loaded folder does not match expected path segment "
         f"'{expected_folder_name}'. Current breadcrumb: {joined_titles}"

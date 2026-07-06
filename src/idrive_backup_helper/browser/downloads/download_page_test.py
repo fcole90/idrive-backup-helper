@@ -686,6 +686,159 @@ def test_ensure_folder_loaded_skips_folder_when_error_banner_shows(
     assert navigate_calls["count"] == FOLDER_UNAVAILABLE_RETRY_LIMIT
 
 
+class FakeLateBannerPage:
+    """Breadcrumb never reaches the target; the error banner only becomes visible
+    after a few reads, so a single check would miss it but the poll catches it."""
+
+    def __init__(
+        self, *, breadcrumb_titles: list[str], banner_text: str, banner_after_reads: int
+    ) -> None:
+        self.url = "https://www.idrive.com/idrive/home/device/F"
+        self._titles = breadcrumb_titles
+        self._banner_text = banner_text
+        self._banner_after_reads = banner_after_reads
+        self._banner_reads = 0
+        self.wait_calls = 0
+
+    def is_closed(self) -> bool:
+        return False
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        self.wait_calls += 1
+
+    def evaluate(self, expression: str) -> object:
+        if "error_msg" in expression:
+            self._banner_reads += 1
+            if self._banner_reads > self._banner_after_reads:
+                return self._banner_text
+            return None
+        return list(self._titles)
+
+
+class FakeLateLoadPage:
+    """Breadcrumb starts on the parent and only reaches the target after a few
+    reads (a slightly late load); no banner ever shows."""
+
+    def __init__(
+        self, *, parent_titles: list[str], target_title: str, load_after_reads: int
+    ) -> None:
+        self.url = "https://www.idrive.com/idrive/home/device/F"
+        self._parent_titles = parent_titles
+        self._target_title = target_title
+        self._load_after_reads = load_after_reads
+        self._breadcrumb_reads = 0
+
+    def is_closed(self) -> bool:
+        return False
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        pass
+
+    def evaluate(self, expression: str) -> object:
+        if "error_msg" in expression:
+            return None
+        self._breadcrumb_reads += 1
+        if self._breadcrumb_reads > self._load_after_reads:
+            return [*self._parent_titles, self._target_title]
+        return list(self._parent_titles)
+
+
+def test_ensure_folder_loaded_catches_late_rendering_error_banner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The banner renders a beat after the click script's poll already returned and
+    # after the first breadcrumb/banner check: the outcome poll keeps looking and
+    # still classifies the folder as unavailable rather than an ordinary load miss.
+    def fake_navigate(page: object, target_url: str, timeout_ms: int) -> None:
+        return None
+
+    def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
+        _fake_ensure_authenticated_page,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.navigate_to_folder_with_clicks",
+        fake_navigate,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        no_sleep,
+    )
+
+    page = FakeLateBannerPage(
+        breadcrumb_titles=["device", "F"],
+        banner_text="There is some problem. Try later.",
+        banner_after_reads=2,
+    )
+
+    with pytest.raises(FolderUnavailableError, match="refused to open"):
+        ensure_folder_loaded_for_download(
+            cast(Page, page),
+            target_url="https://www.idrive.com/idrive/home/device/F/broken_folder",
+            timeout_ms=60_000,
+            allow_interactive_login=False,
+            expected_folder_name="broken_folder",
+        )
+
+    # It polled (waited) before the banner became visible instead of failing at once.
+    assert page.wait_calls >= 2
+
+
+def test_ensure_folder_loaded_accepts_late_breadcrumb_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The folder loads a beat late (breadcrumb reaches the target after a couple of
+    # reads): the poll rescues it, so a slow-but-valid folder is not falsely skipped.
+    navigate_calls = {"count": 0}
+
+    def fake_navigate(page: object, target_url: str, timeout_ms: int) -> None:
+        navigate_calls["count"] += 1
+
+    def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
+        _fake_ensure_authenticated_page,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.navigate_to_folder_with_clicks",
+        fake_navigate,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        no_sleep,
+    )
+
+    page = FakeLateLoadPage(
+        parent_titles=["device", "F"],
+        target_title="slow_folder",
+        load_after_reads=2,
+    )
+
+    ensure_folder_loaded_for_download(
+        cast(Page, page),
+        target_url="https://www.idrive.com/idrive/home/device/F/slow_folder",
+        timeout_ms=60_000,
+        allow_interactive_login=False,
+        expected_folder_name="slow_folder",
+    )
+
+    # Loaded on the first attempt — no quick-retry skip was triggered.
+    assert navigate_calls["count"] == 1
+
+
 def test_is_current_folder_url_normalizes_encoding_and_trailing_slash() -> None:
     assert (
         is_current_folder_url(
