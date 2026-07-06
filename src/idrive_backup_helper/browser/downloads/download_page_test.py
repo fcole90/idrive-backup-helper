@@ -17,8 +17,10 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import (
     DOWNLOAD_START_TIMEOUT_MS,
+    FOLDER_UNAVAILABLE_RETRY_LIMIT,
     RETRY_SLEEP_SLICE_SECONDS,
     BrowserClosedError,
+    FolderUnavailableError,
     NavigationPlan,
     SelectorState,
     plan_breadcrumb_navigation,
@@ -523,6 +525,89 @@ def test_load_folder_entries_aborts_without_retry_when_browser_closed(
             expected_folder_name=None,
             use_folder_cache=False,
         )
+
+
+def test_navigate_to_folder_with_clicks_raises_on_idrive_error_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When the folder click surfaces IDrive's "There is some problem" box, the
+    # click helper reports it and navigation bails with FolderUnavailableError
+    # rather than pretending the click succeeded.
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._load_js_asset",
+        _fake_load_js_asset,
+    )
+    page = FakeUnavailableClickPage(url="https://www.idrive.com/idrive/home")
+
+    with pytest.raises(FolderUnavailableError, match="refused to open"):
+        navigate_to_folder_with_clicks(
+            cast(Page, page),
+            "https://www.idrive.com/idrive/home/device/F/fold_2",
+            60_000,
+        )
+
+    # Bailed on the very first failing click, not after clicking deeper.
+    assert page.folder_click_calls == 1
+
+
+def test_load_folder_entries_quick_retries_then_skips_unavailable_folder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A folder IDrive refuses to open is retried only a few times with a short
+    # pause and then surfaced as FolderUnavailableError — never looping the full
+    # multi-hour folder-load window.
+    navigate_calls = {"count": 0}
+
+    def fake_navigate(page: object, target_url: str, timeout_ms: int) -> None:
+        navigate_calls["count"] += 1
+        raise FolderUnavailableError(
+            'IDrive refused to open folder "folder": '
+            "There is some problem. Try later."
+        )
+
+    slept: list[float] = []
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
+        _fake_ensure_authenticated_page,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.navigate_to_folder_with_clicks",
+        fake_navigate,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        slept.append,
+    )
+
+    with pytest.raises(FolderUnavailableError):
+        load_folder_entries_with_retry(
+            cast(
+                Page, FakeUnavailableLoadPage(url="https://www.idrive.com/idrive/home")
+            ),
+            downloads_dir=tmp_path,
+            target_url="https://www.idrive.com/idrive/home/device/F/folder",
+            timeout_ms=60_000,
+            allow_interactive_login=True,
+            expected_folder_name=None,
+            use_folder_cache=False,
+        )
+
+    # Exactly the quick-retry budget of navigation attempts, no more.
+    assert navigate_calls["count"] == FOLDER_UNAVAILABLE_RETRY_LIMIT
+    # Each of the (limit - 1) short backoffs (3s) is slept as 1s slices; the long
+    # 10s folder-load backoff is never used for an unavailable folder.
+    assert slept == [RETRY_SLEEP_SLICE_SECONDS] * (
+        (FOLDER_UNAVAILABLE_RETRY_LIMIT - 1) * 3
+    )
 
 
 def test_is_current_folder_url_normalizes_encoding_and_trailing_slash() -> None:
@@ -1168,6 +1253,43 @@ class FakeClickPage(FakeLoadPage):
         assert expression == "fake folder script"
         self.evaluate_payloads.append(cast(FolderClickPayload, payload))
         return {"ok": True}
+
+
+class FakeUnavailableClickPage(FakeLoadPage):
+    """A page whose folder click always reports IDrive's "problem" error box."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url)
+        self.folder_click_calls = 0
+
+    def evaluate(self, expression: str, payload: object = None) -> object:
+        if payload is None:
+            # Inline breadcrumb-read expression: no crumbs visible.
+            return []
+        assert expression == "fake folder script"
+        self.folder_click_calls += 1
+        return {
+            "ok": False,
+            "folderUnavailable": True,
+            "reason": (
+                'IDrive refused to open folder "device": '
+                "There is some problem. Try later."
+            ),
+        }
+
+
+class FakeUnavailableLoadPage:
+    """An open page whose URL never matches the target, used to exercise the
+    quick-retry-then-skip path when navigation keeps raising unavailability."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    def is_closed(self) -> bool:
+        return False
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        pass
 
 
 class FakeClimbPage(FakeLoadPage):

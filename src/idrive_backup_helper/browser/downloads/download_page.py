@@ -54,6 +54,12 @@ FOLDER_SETTLE_EMPTY_CONFIRM_CHECKS = 2
 FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
+# A folder IDrive refuses to open ("There is some problem. Try later.") is retried
+# only a few times with a short pause — the message claims to be transient — and
+# then skipped, instead of burning the full folder-load retry window on a folder
+# the backend will not open right now.
+FOLDER_UNAVAILABLE_RETRY_LIMIT = 3
+FOLDER_UNAVAILABLE_RETRY_INTERVAL_MS = 3_000
 # Backoff between retries is slept in short slices (page-independent time.sleep)
 # so a mid-wait browser close is noticed promptly and the cooperatively-scheduled
 # Playwright event loop is not frozen for the whole interval.
@@ -341,6 +347,16 @@ def _ensure_expected_folder_loaded(
     )
 
 
+class FolderUnavailableError(RuntimeError):
+    """IDrive refused to open a folder (the "There is some problem. Try later."
+    error box), so its contents cannot be listed or downloaded right now.
+
+    Distinct from a generic load failure so the caller retries only a few times and
+    then skips the folder, instead of spending the full folder-load retry window on
+    a folder the backend will not open.
+    """
+
+
 def _ensure_click_result(raw_result: object, folder_name: str) -> None:
     if not isinstance(raw_result, dict):
         return
@@ -351,8 +367,14 @@ def _ensure_click_result(raw_result: object, folder_name: str) -> None:
         return
 
     reason_value = result_dict.get("reason")
-    if isinstance(reason_value, str) and reason_value:
-        raise RuntimeError(reason_value)
+    reason = reason_value if isinstance(reason_value, str) and reason_value else None
+    if result_dict.get("folderUnavailable") is True:
+        raise FolderUnavailableError(
+            reason or f"IDrive refused to open folder: {folder_name}"
+        )
+
+    if reason is not None:
+        raise RuntimeError(reason)
 
     raise RuntimeError(f"Folder click failed for {folder_name}")
 
@@ -677,6 +699,7 @@ def _load_folder_with_retry(
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder load retry exhausted")
     attempt = 1
+    unavailable_attempts = 0
 
     while True:
         try:
@@ -704,6 +727,23 @@ def _load_folder_with_retry(
             _ensure_expected_folder_loaded(page, expected_folder_name)
             _log(f"Folder load succeeded on attempt {attempt}: {target_url}")
             return
+        except FolderUnavailableError as error:
+            # IDrive actively refused to open the folder. Give it only a few quick
+            # tries (the error claims to be transient) and then re-raise so the
+            # caller skips it, rather than looping the full retry window.
+            last_error = error
+            unavailable_attempts += 1
+            _abort_if_browser_closed(page, error)
+            _log(
+                "Folder unavailable "
+                f"(attempt {unavailable_attempts}/{FOLDER_UNAVAILABLE_RETRY_LIMIT}): "
+                f"{target_url} ({error})"
+            )
+            if unavailable_attempts >= FOLDER_UNAVAILABLE_RETRY_LIMIT:
+                raise
+            attempt += 1
+            _sleep_before_retry(page, FOLDER_UNAVAILABLE_RETRY_INTERVAL_MS)
+            continue
         except Exception as error:
             last_error = error
             _log(f"Folder load attempt {attempt} failed: {error}")
@@ -778,6 +818,11 @@ def load_folder_entries_with_retry(
             write_folder_entries_cache(downloads_dir, target_url, entries)
 
             return entries
+        except FolderUnavailableError:
+            # _load_folder_with_retry already exhausted its quick retries; do not
+            # spend this outer window on a folder IDrive will not open. Propagate so
+            # the caller skips it.
+            raise
         except Exception as error:
             last_error = error
             _log(f"Folder entries attempt {attempt} failed: {error}")

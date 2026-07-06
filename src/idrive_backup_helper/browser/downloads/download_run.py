@@ -32,6 +32,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import (
     BrowserClosedError,
+    FolderUnavailableError,
     ensure_folder_loaded_for_download,
     idrive_home_url,
     load_folder_entries_with_retry,
@@ -487,6 +488,7 @@ def download_current_folder(
     )
     folders_processed = 0
     folders_since_recycle = 0
+    folders_unavailable = 0
     recoveries_used = 0
     last_resource_sample_at = 0.0
     cmdline_markers = browser_cmdline_markers(profile_dir, browser_debug_url)
@@ -554,6 +556,22 @@ def download_current_folder(
                         headless=headless,
                         use_folder_cache=use_folder_cache,
                     )
+                except FolderUnavailableError as error:
+                    # IDrive would not open this folder even after a few quick
+                    # retries. Skip it (and its whole subtree) and keep the run
+                    # going instead of failing the run or looping for a long time.
+                    folders_unavailable += 1
+                    log_download_message(
+                        "Skipping folder IDrive would not open: "
+                        f"{folder_task.url} ({error})"
+                    )
+                    progress_logger.log(
+                        "folder_unavailable",
+                        folderUrl=folder_task.url,
+                        destination=str(folder_task.destination),
+                        reason=str(error),
+                    )
+                    continue
                 except BrowserClosedError as error:
                     recoveries_used += 1
                     # Every tab death is evidence: capture diagnostics whether or
@@ -609,6 +627,11 @@ def download_current_folder(
 
     finished_at = datetime.now()
     counts = manifest_writer.finalize(finished_at)
+    if folders_unavailable:
+        log_download_message(
+            f"{folders_unavailable} folder(s) skipped because IDrive would not "
+            "open them (see folder_unavailable events in the progress log)"
+        )
     report = DownloadFolderReport(
         url=url,
         destination=destination,
@@ -617,12 +640,14 @@ def download_current_folder(
         counts=counts,
         manifest_path=manifest_path,
         progress_log_path=progress_log_path,
+        folders_unavailable=folders_unavailable,
     )
     progress_logger.log(
         "run_finished",
         downloadedCount=counts.downloaded,
         skippedCount=counts.skipped,
         failedCount=counts.failed,
+        foldersUnavailable=folders_unavailable,
         manifestPath=str(manifest_path),
         exitCode=report.exit_code,
     )

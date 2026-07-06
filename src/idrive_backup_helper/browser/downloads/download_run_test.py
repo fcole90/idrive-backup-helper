@@ -11,7 +11,10 @@ from idrive_backup_helper.browser.downloads.download_models import (
     RemoteFile,
     RemoteFolder,
 )
-from idrive_backup_helper.browser.downloads.download_page import BrowserClosedError
+from idrive_backup_helper.browser.downloads.download_page import (
+    BrowserClosedError,
+    FolderUnavailableError,
+)
 from idrive_backup_helper.browser.downloads.download_run import (
     TAB_DEATH_RECOVERY_LIMIT,
     download_current_folder,
@@ -594,3 +597,87 @@ def _fake_transfer_remote_file_to_destination(
         staged_path=staged_path,
         final_path=final_path,
     )
+
+
+def test_download_current_folder_skips_folder_idrive_refuses_to_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    root_url = "https://example.com/root"
+    child_url = "https://example.com/root/child"
+
+    def load_with_broken_child(
+        page: object,
+        *,
+        downloads_dir: Path,
+        target_url: str,
+        timeout_ms: int,
+        allow_interactive_login: bool,
+        expected_folder_name: str | None,
+        use_folder_cache: bool,
+    ) -> RemoteEntries:
+        if target_url == child_url:
+            # IDrive would not open this child folder even after quick retries.
+            raise FolderUnavailableError(
+                'IDrive refused to open folder "child": '
+                "There is some problem. Try later."
+            )
+        return RemoteEntries(
+            files=[
+                RemoteFile(
+                    file_name="needed.txt",
+                    row_index=1,
+                    server_size_text=None,
+                    server_modified_text=None,
+                ),
+            ],
+            folders=[RemoteFolder(folder_name="child", href=child_url)],
+        )
+
+    monkeypatch.setattr(download_run, "BrowserEngine", FakeBrowserEngine)
+    monkeypatch.setattr(
+        download_run,
+        "load_folder_entries_with_retry",
+        load_with_broken_child,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "ensure_folder_loaded_for_download",
+        _fake_ensure_folder_loaded_for_download,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "transfer_remote_file_to_destination",
+        _fake_transfer_remote_file_to_destination,
+    )
+
+    report = download_current_folder(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        url=root_url,
+        destination=destination,
+        headless=False,
+        timeout_ms=60_000,
+        cooldown_ms=1500,
+        overwrite="replace",
+        use_folder_cache=True,
+        resume_from_logs=False,
+    )
+
+    # The broken child is skipped; the run still finishes and downloads the root's
+    # file. A skipped folder does not fail the run on its own.
+    assert report.folders_unavailable == 1
+    assert report.counts.downloaded == 1
+    assert report.counts.failed == 0
+    assert report.exit_code == 0
+
+    progress_logs = list(downloads_dir.glob("download-folder-progress-*.ndjson"))
+    progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
+    assert '"folder_unavailable"' in progress_text
+    assert '"foldersUnavailable": 1' in progress_text

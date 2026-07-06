@@ -108,6 +108,10 @@ class DownloadFolderReport:
     counts: DownloadCounts
     manifest_path: Path
     progress_log_path: Path | None = None
+    # Folders IDrive refused to open ("There is some problem. Try later.") and that
+    # were skipped so the run could continue. Surfaced in the summary but, by
+    # design, does not fail the run on its own (only failed files set exit_code).
+    folders_unavailable: int = 0
 
     @property
     def exit_code(self) -> int:

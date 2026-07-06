@@ -213,6 +213,8 @@ def _run_download_folder(
     print(f"Downloaded: {report.counts.downloaded}")
     print(f"Skipped: {report.counts.skipped}")
     print(f"Failed: {report.counts.failed}")
+    if report.folders_unavailable:
+        print(f"Unavailable folders (skipped): {report.folders_unavailable}")
     if report.progress_log_path is not None:
         print(f"Progress log: {report.progress_log_path}")
     print(f"Manifest: {report.manifest_path}")
