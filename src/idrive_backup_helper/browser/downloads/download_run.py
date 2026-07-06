@@ -34,10 +34,8 @@ from idrive_backup_helper.browser.downloads.download_page import (
     BrowserClosedError,
     FolderUnavailableError,
     ensure_folder_loaded_for_download,
-    idrive_home_url,
     load_folder_entries_with_retry,
 )
-from idrive_backup_helper.browser.downloads.folder_urls import is_idrive_url
 from idrive_backup_helper.browser.downloads.download_progress import (
     ProgressEventLogger,
     build_progress_log_path,
@@ -75,11 +73,6 @@ def _precheck_overwrite_conflicts(
 # retry the folder. The cap keeps a folder that reliably kills its renderer from
 # looping the run forever; every death still writes a crash-diagnostics report.
 TAB_DEATH_RECOVERY_LIMIT = 5
-# UI-click navigation never tears down IDrive's SPA, so its renderer heap grows
-# for the whole run (6.4h before the 2026-07-05 tab death). A hard goto back to
-# home every N folders destroys the document and resets the heap; the next
-# folder load re-plans from home via the normal click path.
-PAGE_RECYCLE_FOLDER_INTERVAL = 50
 # Resource samples are throttled so cache-driven resume runs (many folders per
 # second) do not pay a process scan per folder.
 RESOURCE_SAMPLE_MIN_INTERVAL_SECONDS = 30.0
@@ -172,25 +165,6 @@ def _reopen_page_after_tab_death(engine: BrowserEngine, dead_page: Page) -> Page
         return None
     log_download_message("Reopened a fresh page after tab death; resuming the run")
     return page
-
-
-def _recycle_page_renderer(
-    page: Page, *, home_url: str, progress_logger: ProgressEventLogger
-) -> None:
-    # A hard navigation destroys the SPA document and frees its renderer heap,
-    # which UI-click navigation otherwise never releases. Best-effort: on failure
-    # the next folder load's own retries surface any real problem.
-    try:
-        log_download_message(
-            f"Recycling the folder page renderer via {home_url} "
-            f"(every {PAGE_RECYCLE_FOLDER_INTERVAL} folder(s))"
-        )
-        page.goto(home_url, wait_until="domcontentloaded")
-        progress_logger.log("page_recycled", homeUrl=home_url)
-    except Exception as recycle_error:
-        log_download_message(
-            f"Page recycle failed; continuing without it: {recycle_error}"
-        )
 
 
 def _log_resource_sample(
@@ -487,12 +461,10 @@ def download_current_folder(
         progress_log_path=progress_log_path,
     )
     folders_processed = 0
-    folders_since_recycle = 0
     folders_unavailable = 0
     recoveries_used = 0
     last_resource_sample_at = 0.0
     cmdline_markers = browser_cmdline_markers(profile_dir, browser_debug_url)
-    home_url = idrive_home_url(url) if is_idrive_url(url) else None
     try:
         with BrowserEngine(config) as engine:
             page = engine.current_page_or_new_page()
@@ -509,18 +481,8 @@ def download_current_folder(
                     )
                     continue
 
-                if (
-                    home_url is not None
-                    and folders_since_recycle >= PAGE_RECYCLE_FOLDER_INTERVAL
-                ):
-                    _recycle_page_renderer(
-                        page, home_url=home_url, progress_logger=progress_logger
-                    )
-                    folders_since_recycle = 0
-
                 visited_destinations.add(folder_task.destination)
                 folders_processed += 1
-                folders_since_recycle += 1
                 ensure_destination_dir(folder_task.destination)
                 log_download_message(
                     f"Processing folder: {folder_task.url} -> {folder_task.destination} "
@@ -605,7 +567,6 @@ def download_current_folder(
                     # journal — acceptable).
                     visited_destinations.discard(folder_task.destination)
                     folder_queue.insert(0, folder_task)
-                    folders_since_recycle = 0
                     progress_logger.log(
                         "tab_death_recovered",
                         recoveryNumber=recoveries_used,
