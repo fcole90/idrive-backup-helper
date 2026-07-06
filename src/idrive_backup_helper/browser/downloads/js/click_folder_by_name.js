@@ -52,17 +52,28 @@ async ({ folderName, folderNameCandidates, settleMinMs, settleMaxMs }) => {
     return { ok: false, reason: `Folder row not found after scrolling: ${candidateNames.join(" or ")}` };
   }
 
-  const isErrorBoxVisible = () => {
-    const box = document.querySelector(".error_msg");
-    if (!box) {
-      return false;
+  // IDrive shows the folder-open failure ("There is some problem. Try later.") in
+  // one of several `.error_msg` divs on the page — the shown one is NOT necessarily
+  // the first in the DOM, so scan them all and match the banner text rather than
+  // trusting a single querySelector (which kept landing on a permanently-hidden
+  // box). Return the visible banner's text, or null when none is showing.
+  const visibleErrorBannerText = () => {
+    const boxes = [...document.querySelectorAll(".error_msg")];
+    for (const box of boxes) {
+      const style = window.getComputedStyle(box);
+      const visible =
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        box.getClientRects().length > 0;
+      if (!visible) {
+        continue;
+      }
+      const text = (box.textContent || "").trim();
+      if (/problem|try later/i.test(text)) {
+        return text;
+      }
     }
-    const style = window.getComputedStyle(box);
-    return (
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      box.getClientRects().length > 0
-    );
+    return null;
   };
 
   folderTrigger.scrollIntoView({ block: "center" });
@@ -70,20 +81,20 @@ async ({ folderName, folderNameCandidates, settleMinMs, settleMaxMs }) => {
   forceClick(folderTrigger);
 
   // After the click IDrive either navigates into the folder or, when the backend
-  // refuses to open it, flashes a global error box ("There is some problem. Try
-  // later.") and stays on the current folder. Poll for that box across the normal
-  // post-click settle delay: a broken folder is reported immediately instead of
-  // silently "succeeding" and pushing the caller into a long retry loop, while a
-  // healthy click never shows the box and pays the same total delay as before.
+  // refuses to open it, flashes the error banner and stays on the current folder.
+  // Poll for that banner across the normal post-click settle delay: a broken folder
+  // is reported immediately instead of silently "succeeding" and pushing the caller
+  // into a long retry loop, while a healthy click never shows it and pays the same
+  // total delay as before.
   const pollSliceMs = 150;
   const errorDeadline = Date.now() + randomDelay();
   while (Date.now() < errorDeadline) {
-    if (isErrorBoxVisible()) {
-      const message = (document.querySelector(".error_msg").textContent || "").trim();
+    const bannerText = visibleErrorBannerText();
+    if (bannerText) {
       return {
         ok: false,
         folderUnavailable: true,
-        reason: `IDrive refused to open folder "${candidateNames[0]}": ${message || "There is some problem. Try later."}`,
+        reason: `IDrive refused to open folder "${candidateNames[0]}": ${bannerText}`,
       };
     }
     await sleep(pollSliceMs);

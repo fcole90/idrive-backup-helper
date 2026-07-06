@@ -330,6 +330,34 @@ def _read_breadcrumb_titles(page: Page) -> list[str]:
     return [title for title in typed_titles if isinstance(title, str)]
 
 
+def _read_error_banner_text(page: Page) -> str | None:
+    # Mirror of the click script's banner scan (see click_folder_by_name.js): the
+    # shown ".error_msg" is not always the first in the DOM, so check them all and
+    # match the banner text. Used as the authoritative fallback when a folder click
+    # left us on the parent (breadcrumb never reached the target).
+    raw_text: object = page.evaluate("""
+() => {
+  const boxes = [...document.querySelectorAll('.error_msg')];
+  for (const box of boxes) {
+    const style = window.getComputedStyle(box);
+    const visible =
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      box.getClientRects().length > 0;
+    if (!visible) {
+      continue;
+    }
+    const text = (box.textContent || '').trim();
+    if (/problem|try later/i.test(text)) {
+      return text;
+    }
+  }
+  return null;
+}
+""")
+    return raw_text if isinstance(raw_text, str) and raw_text else None
+
+
 def _ensure_expected_folder_loaded(
     page: Page, expected_folder_name: str | None
 ) -> None:
@@ -339,6 +367,18 @@ def _ensure_expected_folder_loaded(
     breadcrumb_titles = _read_breadcrumb_titles(page)
     if expected_folder_name in breadcrumb_titles:
         return
+
+    # The target folder never loaded. If IDrive's error banner is up, this is a
+    # folder it refuses to open, not a transient load — skip it quickly instead of
+    # retrying for the full window. This also catches the case where the click
+    # script's own post-click poll missed the banner (its window is short; the
+    # banner lingers ~10s, so it is still visible once the stale parent view has
+    # "settled" and we get here).
+    banner_text = _read_error_banner_text(page)
+    if banner_text is not None:
+        raise FolderUnavailableError(
+            f"IDrive refused to open folder '{expected_folder_name}': {banner_text}"
+        )
 
     joined_titles = "/".join(breadcrumb_titles) if breadcrumb_titles else "<empty>"
     raise RuntimeError(

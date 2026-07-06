@@ -27,6 +27,7 @@ from idrive_backup_helper.browser.downloads.download_page import (
     normalize_folder_href,
     normalize_remote_entries_hrefs,
     download_one_file,
+    ensure_folder_loaded_for_download,
     idrive_folder_path_parts,
     is_current_folder_url,
     load_folder_entries_with_retry,
@@ -608,6 +609,81 @@ def test_load_folder_entries_quick_retries_then_skips_unavailable_folder(
     assert slept == [RETRY_SLEEP_SLICE_SECONDS] * (
         (FOLDER_UNAVAILABLE_RETRY_LIMIT - 1) * 3
     )
+
+
+class FakeBannerLoadPage:
+    """Open page that stays on the parent after a click and serves breadcrumb
+    titles plus error-banner text for the two inline reads in
+    `_ensure_expected_folder_loaded` (branching on the evaluated script)."""
+
+    def __init__(
+        self, *, url: str, breadcrumb_titles: list[str], banner_text: str | None
+    ) -> None:
+        self.url = url
+        self._titles = breadcrumb_titles
+        self._banner_text = banner_text
+
+    def is_closed(self) -> bool:
+        return False
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        pass
+
+    def evaluate(self, expression: str) -> object:
+        if "error_msg" in expression:
+            return self._banner_text
+        return list(self._titles)
+
+
+def test_ensure_folder_loaded_skips_folder_when_error_banner_shows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The click "succeeded" (the click script's short poll missed the banner) but
+    # the SPA stayed on the parent: the breadcrumb never reaches the target and the
+    # ~10s banner is still up. This is IDrive refusing the folder, so we skip after
+    # the quick-retry budget instead of hanging on the full load window.
+    navigate_calls = {"count": 0}
+
+    def fake_navigate(page: object, target_url: str, timeout_ms: int) -> None:
+        navigate_calls["count"] += 1
+
+    def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
+        _fake_ensure_authenticated_page,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        _fake_wait_for_folder_view_settle,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.navigate_to_folder_with_clicks",
+        fake_navigate,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.time.sleep",
+        no_sleep,
+    )
+
+    page = FakeBannerLoadPage(
+        url="https://www.idrive.com/idrive/home/device/F",
+        breadcrumb_titles=["device", "F"],
+        banner_text="There is some problem. Try later.",
+    )
+
+    with pytest.raises(FolderUnavailableError, match="refused to open"):
+        ensure_folder_loaded_for_download(
+            cast(Page, page),
+            target_url="https://www.idrive.com/idrive/home/device/F/broken_folder",
+            timeout_ms=60_000,
+            allow_interactive_login=False,
+            expected_folder_name="broken_folder",
+        )
+
+    # Only the quick-retry budget of attempts, not the full load-retry window.
+    assert navigate_calls["count"] == FOLDER_UNAVAILABLE_RETRY_LIMIT
 
 
 def test_is_current_folder_url_normalizes_encoding_and_trailing_slash() -> None:
