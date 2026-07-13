@@ -168,9 +168,18 @@ def _classify_browser(health: BrowserHealthReport) -> str:
             "our tab/page was closed (closed by the user/OS, or the renderer crashed)."
         )
     if health.cdp_reachable is False:
+        if health.browser_processes_on_profile:
+            # An unanswered probe is not a death certificate: a browser that is
+            # swapping or wedged stops serving CDP while its processes keep running.
+            return (
+                "The CDP endpoint does not answer, but "
+                f"{health.browser_processes_on_profile} browser process(es) are still "
+                "running on our profile, so the browser is **hung, not gone** — or it "
+                "was too busy to answer the probe in time."
+            )
         return (
-            "The CDP endpoint is unreachable, so the **whole browser process is gone** "
-            "(it exited or crashed)."
+            "The CDP endpoint is unreachable and no browser process is running on our "
+            "profile, so the **whole browser process is gone** (it exited or crashed)."
         )
     return (
         "No CDP endpoint to probe (owned browser context), so tab-close vs full "
@@ -218,6 +227,8 @@ def render_crash_report(
         f"- Detached PID: {_format_int(health.detached_pid)}",
         f"- Detached still running: {_format_flag(health.detached_running)}",
         f"- Detached exit code: {_format_int(health.detached_exit_code)}",
+        f"- Browser processes on profile: "
+        f"{_format_int(health.browser_processes_on_profile)}",
         "",
         "## Resources at death",
         "",

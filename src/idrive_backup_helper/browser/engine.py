@@ -11,6 +11,7 @@ from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+import psutil
 from playwright.sync_api import (
     Browser,
     BrowserContext,
@@ -23,6 +24,14 @@ from playwright.sync_api import (
 DEFAULT_BROWSER_DEBUG_URL = "http://127.0.0.1:9222"
 CDP_LAUNCH_TIMEOUT_SECONDS = 15.0
 CDP_CONNECT_TIMEOUT_MS = 5_000
+# A browser that is merely wedged or swapping can take many seconds to answer an
+# HTTP probe, so one quick miss is not evidence that it died.
+CDP_PROBE_TIMEOUT_SECONDS = 5.0
+# Before concluding the browser process is gone (and killing/relaunching it), keep
+# probing for this long: a hung-but-alive browser often starts answering again.
+CDP_RECOVERY_WAIT_SECONDS = 60.0
+CDP_RECOVERY_PROBE_INTERVAL_SECONDS = 2.0
+BROWSER_TERMINATE_GRACE_SECONDS = 10.0
 PROFILE_SINGLETON_FILE_NAMES = (
     "SingletonCookie",
     "SingletonLock",
@@ -33,6 +42,7 @@ DETACHED_CHROMIUM_STARTUP_FLAGS = (
     "--no-first-run",
     "--no-default-browser-check",
 )
+_PROC_GONE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 
 def _log(message: str) -> None:
@@ -120,9 +130,11 @@ class BrowserHealthReport:
     """A read-only snapshot of the browser's liveness, taken after a mid-run death.
 
     Gathered without touching Playwright (only an HTTP probe of the CDP endpoint,
-    a subprocess ``poll``, and a log read), so it is safe to collect once the page
-    or context is already gone. ``cdp_reachable`` is the key signal: True means only
-    our tab/page closed, False means the whole browser process is gone.
+    a process scan, a subprocess ``poll``, and a log read), so it is safe to collect
+    once the page or context is already gone. ``cdp_reachable`` alone cannot tell a
+    dead browser from a hung one — a swamped machine can miss the probe while
+    Chromium is still running — so it is read together with
+    ``browser_processes_on_profile``, which counts the processes that actually exist.
     """
 
     mode: str
@@ -133,10 +145,68 @@ class BrowserHealthReport:
     detached_exit_code: int | None
     detached_running: bool | None
     chromium_log_tail: str | None
+    browser_processes_on_profile: int | None = None
+
+
+def browser_processes_on_profile(profile_dir: Path) -> list[psutil.Process]:
+    """Chromium processes running against our profile directory.
+
+    Matched on the ``--user-data-dir`` switch, which is Chrome-specific, so this
+    can never match our own Python process. The profile belongs to this tool, so
+    whatever runs on it is ours to terminate regardless of who launched it.
+    """
+    marker = f"--user-data-dir={profile_dir}"
+    matched: list[psutil.Process] = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = " ".join(proc.info.get("cmdline") or [])
+        except _PROC_GONE:
+            continue
+        if marker in cmdline:
+            matched.append(proc)
+    return matched
+
+
+def terminate_browser_processes_on_profile(profile_dir: Path) -> int:
+    """Terminate (then kill) every browser process on our profile. Returns the count.
+
+    Killing the roots normally takes the renderer children with them, but a wedged
+    Chromium can leave orphans holding the profile lock, which would then block the
+    relaunch — so the whole tree is collected up front and killed explicitly.
+    """
+    victims: dict[int, psutil.Process] = {}
+    for root in browser_processes_on_profile(profile_dir):
+        victims[root.pid] = root
+        try:
+            for child in root.children(recursive=True):
+                victims[child.pid] = child
+        except _PROC_GONE:
+            continue
+
+    processes = list(victims.values())
+    if not processes:
+        return 0
+
+    for proc in processes:
+        try:
+            proc.terminate()
+        except _PROC_GONE:
+            continue
+
+    _gone, alive = psutil.wait_procs(processes, timeout=BROWSER_TERMINATE_GRACE_SECONDS)
+    for proc in alive:
+        try:
+            proc.kill()
+        except _PROC_GONE:
+            continue
+    if alive:
+        psutil.wait_procs(alive, timeout=BROWSER_TERMINATE_GRACE_SECONDS)
+
+    return len(processes)
 
 
 def _probe_cdp_version(
-    endpoint_url: str, *, timeout_seconds: float = 2.0
+    endpoint_url: str, *, timeout_seconds: float = CDP_PROBE_TIMEOUT_SECONDS
 ) -> str | None:
     version_url = endpoint_url.rstrip("/") + "/json/version"
     try:
@@ -180,31 +250,39 @@ class BrowserEngine:
         self._config.staging_dir.mkdir(parents=True, exist_ok=True)
 
         self._playwright = self._playwright_context.__enter__()
-        if self._config.browser_debug_url is None:
-            chromium_executable = ensure_playwright_chromium_executable(
-                self._playwright
+        self._browser_context = self._open_browser_context()
+        self._browser_context.set_default_timeout(self._config.timeout_ms)
+        return self
+
+    def _open_browser_context(self) -> BrowserContext:
+        playwright = self._playwright
+        if playwright is None:
+            raise RuntimeError(
+                "BrowserEngine must be entered before opening a context."
             )
+
+        if self._config.browser_debug_url is None:
+            chromium_executable = ensure_playwright_chromium_executable(playwright)
             _log(
                 "Launching owned persistent browser context "
                 f"(headless={self._config.headless}, profile={self._config.profile_dir}, "
                 f"downloads={self._config.staging_dir})"
             )
-            self._browser_context = self._playwright.chromium.launch_persistent_context(
+            return playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self._config.profile_dir),
                 executable_path=str(chromium_executable),
                 headless=self._config.headless,
                 accept_downloads=True,
                 downloads_path=str(self._config.staging_dir),
             )
-        else:
-            self._browser = self._connect_or_launch_browser(self._playwright)
-            self._browser_context = self._default_browser_context(self._browser)
-            _log(
-                "Using detached browser context "
-                f"with {len(self._browser_context.pages)} existing page(s)"
-            )
-        self._browser_context.set_default_timeout(self._config.timeout_ms)
-        return self
+
+        self._browser = self._connect_or_launch_browser(playwright)
+        browser_context = self._default_browser_context(self._browser)
+        _log(
+            "Using detached browser context "
+            f"with {len(browser_context.pages)} existing page(s)"
+        )
+        return browser_context
 
     def __exit__(
         self,
@@ -243,6 +321,13 @@ class BrowserEngine:
             _startup_log_summary(launch.log_path) if launch is not None else None
         )
 
+        try:
+            profile_process_count = len(
+                browser_processes_on_profile(self._config.profile_dir)
+            )
+        except Exception:
+            profile_process_count = None
+
         if cdp_url is None:
             mode = "owned-context"
         elif launch is not None:
@@ -259,6 +344,7 @@ class BrowserEngine:
             detached_exit_code=detached_exit_code,
             detached_running=detached_running,
             chromium_log_tail=chromium_log_tail,
+            browser_processes_on_profile=profile_process_count,
         )
 
     def new_page(self) -> Page:
@@ -280,6 +366,160 @@ class BrowserEngine:
 
         _log("No existing browser page found; opening new page")
         return self._browser_context.new_page()
+
+    def close_other_pages(self, keep: Page) -> int:
+        """Close every tab except ``keep``, returning how many were closed.
+
+        The profile is this tool's own, so any other tab is leftover state — a
+        download-artifact error page, a wedged folder view — still holding a
+        renderer. ``keep`` must already be open: dropping to zero tabs quits
+        Chromium.
+        """
+        if self._browser_context is None:
+            return 0
+
+        closed_count = 0
+        for tab in list(self._browser_context.pages):
+            if tab is keep:
+                continue
+            try:
+                if tab.is_closed():
+                    continue
+                tab.close()
+            except Exception as error:
+                _log(f"Could not close leftover tab: {error}")
+                continue
+            closed_count += 1
+
+        if closed_count:
+            _log(f"Closed {closed_count} leftover tab(s)")
+        return closed_count
+
+    def recover_page(self, dead_page: Page | None = None) -> Page:
+        """Return a usable page after the current one died or stopped responding.
+
+        Escalates only as far as it must:
+
+        1. a fresh tab on the existing connection — enough when just the renderer
+           died (OOM kill, Memory Saver discard) or a single tab wedged;
+        2. a reconnect over CDP — the browser process is fine but our websocket to
+           it dropped, which leaves every cached Playwright object permanently dead
+           (``BrowserContext.new_page`` then fails exactly like the page did);
+        3. a kill-and-relaunch of the browser itself.
+
+        Raises ``RuntimeError`` if even a relaunched browser yields no page.
+        """
+        self._close_page_quietly(dead_page)
+
+        page = self._new_page_or_none()
+        if page is not None:
+            _log("Recovered on the existing browser connection with a fresh tab")
+            self.close_other_pages(keep=page)
+            return page
+
+        if self._config.browser_debug_url is not None:
+            page = self._reattach_over_cdp_or_none()
+            if page is not None:
+                self.close_other_pages(keep=page)
+                return page
+
+        return self.restart_browser()
+
+    def restart_browser(self) -> Page:
+        """Kill every browser on our profile, launch a fresh one, and open a page.
+
+        The profile survives the restart, so the IDrive session survives with it and
+        the run resumes without a new login.
+        """
+        _log("Restarting the browser from scratch")
+        self._discard_playwright_browser()
+
+        terminated_count = terminate_browser_processes_on_profile(
+            self._config.profile_dir
+        )
+        if terminated_count:
+            _log(f"Terminated {terminated_count} browser process(es) on the profile")
+
+        removed_lock_paths = remove_stale_browser_profile_lock_files(
+            self._config.profile_dir
+        )
+        if removed_lock_paths:
+            removed_names = ", ".join(path.name for path in removed_lock_paths)
+            _log(f"Removed stale Chromium profile lock file(s): {removed_names}")
+
+        browser_context = self._open_browser_context()
+        browser_context.set_default_timeout(self._config.timeout_ms)
+        self._browser_context = browser_context
+
+        page = browser_context.new_page()
+        _log("Browser relaunched; recovered onto a fresh page")
+        self.close_other_pages(keep=page)
+        return page
+
+    def _new_page_or_none(self) -> Page | None:
+        if self._browser_context is None:
+            return None
+
+        try:
+            return self._browser_context.new_page()
+        except Exception as error:
+            _log(f"Could not open a tab on the existing connection: {error}")
+            return None
+
+    def _reattach_over_cdp_or_none(self) -> Page | None:
+        endpoint_url = self._config.browser_debug_url
+        playwright = self._playwright
+        if endpoint_url is None or playwright is None:
+            return None
+
+        cdp_version = _wait_for_cdp_version(
+            endpoint_url, timeout_seconds=CDP_RECOVERY_WAIT_SECONDS
+        )
+        if cdp_version is None:
+            _log(
+                "CDP endpoint stayed silent for "
+                f"{CDP_RECOVERY_WAIT_SECONDS:.0f}s: {endpoint_url}"
+            )
+            return None
+
+        _log(
+            f"CDP endpoint still answers ({cdp_version}); the browser is alive and "
+            "only our connection to it dropped. Reattaching."
+        )
+        self._discard_playwright_browser()
+        try:
+            browser = playwright.chromium.connect_over_cdp(
+                endpoint_url,
+                timeout=CDP_CONNECT_TIMEOUT_MS,
+            )
+            browser_context = self._default_browser_context(browser)
+            browser_context.set_default_timeout(self._config.timeout_ms)
+            page = browser_context.new_page()
+        except (Error, RuntimeError) as error:
+            _log(f"Reattaching over CDP failed: {error}")
+            return None
+
+        self._browser = browser
+        self._browser_context = browser_context
+        _log("Reattached to the running browser")
+        return page
+
+    def _discard_playwright_browser(self) -> None:
+        # Drop the stale Playwright handles without calling close() on them: over a
+        # CDP connection close() can reach through and shut the browser down, which
+        # is the opposite of what recovery wants. A dead connection has nothing left
+        # to release anyway, and a restart kills the process outright.
+        self._browser = None
+        self._browser_context = None
+
+    @staticmethod
+    def _close_page_quietly(page: Page | None) -> None:
+        if page is None:
+            return
+        try:
+            page.close()
+        except Exception:
+            pass  # Usually already gone; a close failure changes nothing.
 
     def _connect_or_launch_browser(self, playwright: Playwright) -> Browser:
         if self._config.browser_debug_url is None:
@@ -391,6 +631,21 @@ def _parse_local_debug_endpoint(endpoint_url: str) -> BrowserDebugEndpoint:
         )
 
     return BrowserDebugEndpoint(host=parsed_url.hostname, port=parsed_url.port)
+
+
+def _wait_for_cdp_version(endpoint_url: str, *, timeout_seconds: float) -> str | None:
+    # Keep asking rather than trusting one miss: under memory pressure the browser
+    # can be too busy to answer for seconds at a time while still being perfectly
+    # alive, and treating that as death would kill a browser worth keeping.
+    deadline = time.monotonic() + timeout_seconds
+    _log(f"Probing CDP endpoint for up to {timeout_seconds:.0f}s: {endpoint_url}")
+    while True:
+        cdp_version = _probe_cdp_version(endpoint_url)
+        if cdp_version is not None:
+            return cdp_version
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(CDP_RECOVERY_PROBE_INTERVAL_SECONDS)
 
 
 def _wait_for_cdp_endpoint(

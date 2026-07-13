@@ -17,9 +17,12 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import (
     DOWNLOAD_START_TIMEOUT_MS,
+    FOLDER_LOAD_TIMEOUT_LIMIT,
     FOLDER_UNAVAILABLE_RETRY_LIMIT,
     RETRY_SLEEP_SLICE_SECONDS,
     BrowserClosedError,
+    BrowserHungError,
+    FolderLoadTimeoutError,
     FolderUnavailableError,
     NavigationPlan,
     SelectorState,
@@ -1707,3 +1710,107 @@ def _remote_file(file_name: str) -> RemoteFile:
         server_size_text=None,
         server_modified_text=None,
     )
+
+
+class FakeHungPage:
+    """Still open — nothing closed it — but folder loads never finish."""
+
+    def __init__(self) -> None:
+        self.url = "https://www.idrive.com/idrive/home/device/parent"
+
+    def is_closed(self) -> bool:
+        return False
+
+
+def _patch_hang(monkeypatch: pytest.MonkeyPatch, settle_error: Exception) -> None:
+    def raise_settle_error(*_args: object, **_kwargs: object) -> None:
+        raise settle_error
+
+    def do_nothing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.navigate_to_folder_with_clicks",
+        do_nothing,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.ensure_authenticated_page",
+        do_nothing,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.wait_for_folder_view_settle",
+        raise_settle_error,
+    )
+    # The real backoff would sleep 10s between attempts; the hang must be reported
+    # from the attempt count, not from waiting anyone out.
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._sleep_before_retry",
+        do_nothing,
+    )
+
+
+@pytest.mark.parametrize(
+    "settle_error",
+    [
+        FolderLoadTimeoutError("Timed out waiting for folder loader to finish"),
+        PlaywrightTimeoutError("page.evaluate: Timeout 120000ms exceeded"),
+    ],
+)
+def test_load_folder_reports_a_hang_instead_of_grinding_the_retry_window(
+    monkeypatch: pytest.MonkeyPatch,
+    settle_error: Exception,
+) -> None:
+    # A wedged page fails every load the same way. Retrying it inside the two-hour
+    # folder-load window would stall the run for hours on one folder, so the loads
+    # are counted and a hang is reported to the caller, which recycles the browser.
+    _patch_hang(monkeypatch, settle_error)
+
+    with pytest.raises(BrowserHungError, match="stopped responding"):
+        ensure_folder_loaded_for_download(
+            cast(Page, FakeHungPage()),
+            target_url="https://www.idrive.com/idrive/home/device/parent/child",
+            timeout_ms=120_000,
+            allow_interactive_login=False,
+            expected_folder_name="child",
+        )
+
+
+def test_load_folder_entries_propagates_a_hang_without_retrying_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    load_calls = 0
+
+    def hung_load_folder_with_retry(*_args: object, **_kwargs: object) -> None:
+        nonlocal load_calls
+        load_calls += 1
+        raise BrowserHungError("the page or the browser has stopped responding")
+
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page.load_folder_entries_cache",
+        _fake_load_folder_entries_cache,
+    )
+    monkeypatch.setattr(
+        "idrive_backup_helper.browser.downloads.download_page._load_folder_with_retry",
+        hung_load_folder_with_retry,
+    )
+
+    with pytest.raises(BrowserHungError):
+        load_folder_entries_with_retry(
+            cast(Page, FakeHungPage()),
+            downloads_dir=tmp_path,
+            target_url="https://example.com/folder",
+            timeout_ms=60_000,
+            allow_interactive_login=True,
+            expected_folder_name=None,
+            use_folder_cache=True,
+        )
+
+    # The outer window must not re-run a load that already reported a hang: the
+    # browser has to be recycled first, and only the caller can do that.
+    assert load_calls == 1
+
+
+def test_folder_load_timeout_limit_is_small_enough_to_notice_a_hang_quickly() -> None:
+    # Two 120s loads (~4 minutes) instead of the two-hour retry window.
+    assert FOLDER_LOAD_TIMEOUT_LIMIT == 2

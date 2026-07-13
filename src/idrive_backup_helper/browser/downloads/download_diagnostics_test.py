@@ -39,6 +39,38 @@ def _resources() -> ResourceSnapshot:
     )
 
 
+def test_render_crash_report_flags_hung_browser_when_processes_outlive_the_cdp_probe() -> (
+    None
+):
+    # The 2026-07-05 report declared "the whole browser process is gone" while its
+    # own data said the process was still running — an unanswered probe was being
+    # read as a death certificate. A browser that is swapping or wedged stops
+    # serving CDP long before it exits, and killing it is a different fix from
+    # waiting for it, so the two must not be reported as one thing.
+    health = BrowserHealthReport(
+        mode="launched-cdp",
+        cdp_url="http://127.0.0.1:9222",
+        cdp_reachable=False,
+        cdp_version=None,
+        detached_pid=18604,
+        detached_exit_code=None,
+        detached_running=True,
+        chromium_log_tail=None,
+        browser_processes_on_profile=12,
+    )
+
+    report = render_crash_report(
+        context=_context(),
+        health=health,
+        resources=_resources(),
+        captured_at=datetime(2026, 7, 5, 14, 1, 0),
+    )
+
+    assert "hung, not gone" in report
+    assert "whole browser process is gone" not in report
+    assert "Browser processes on profile: 12" in report
+
+
 def test_render_crash_report_flags_dead_browser_when_cdp_unreachable() -> None:
     health = BrowserHealthReport(
         mode="attached-cdp",
@@ -49,6 +81,7 @@ def test_render_crash_report_flags_dead_browser_when_cdp_unreachable() -> None:
         detached_exit_code=None,
         detached_running=None,
         chromium_log_tail=None,
+        browser_processes_on_profile=0,
     )
 
     report = render_crash_report(

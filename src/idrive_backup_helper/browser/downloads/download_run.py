@@ -32,6 +32,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import (
     BrowserClosedError,
+    BrowserHungError,
     FolderUnavailableError,
     ensure_folder_loaded_for_download,
     load_folder_entries_with_retry,
@@ -72,7 +73,11 @@ def _precheck_overwrite_conflicts(
 # discard) is recoverable while the browser itself stays alive: reopen a page and
 # retry the folder. The cap keeps a folder that reliably kills its renderer from
 # looping the run forever; every death still writes a crash-diagnostics report.
-TAB_DEATH_RECOVERY_LIMIT = 5
+TAB_DEATH_RECOVERY_LIMIT = 10
+# Reopening a tab fixes a dead renderer but not a browser that is itself sick. If
+# this many recoveries in a row buy no progress — not one folder completes between
+# them — stop reopening tabs and relaunch the browser process from scratch.
+RESTART_AFTER_RECOVERIES_WITHOUT_PROGRESS = 2
 # Resource samples are throttled so cache-driven resume runs (many folders per
 # second) do not pay a process scan per folder.
 RESOURCE_SAMPLE_MIN_INTERVAL_SECONDS = 30.0
@@ -87,7 +92,7 @@ def _capture_browser_crash_diagnostics(
     current_folder: FolderTask,
     manifest_writer: StreamingManifestWriter,
     progress_logger: ProgressEventLogger,
-    error: BrowserClosedError,
+    error: BrowserClosedError | BrowserHungError,
     cmdline_markers: Sequence[str],
     death_number: int,
 ) -> None:
@@ -149,22 +154,27 @@ def _capture_browser_crash_diagnostics(
         )
 
 
-def _reopen_page_after_tab_death(engine: BrowserEngine, dead_page: Page) -> Page | None:
-    # Opening a page doubles as the browser liveness test: if the whole browser
-    # (or its CDP connection) is gone this raises and the caller aborts; if only
-    # the tab/renderer died (OOM kill, Memory Saver discard) it succeeds and the
-    # run continues on the fresh page.
+def _recover_page(
+    engine: BrowserEngine,
+    dead_page: Page,
+    *,
+    recoveries_without_progress: int,
+) -> Page | None:
+    # The engine escalates on its own (fresh tab -> reconnect -> relaunch), but it
+    # cannot see whether the recoveries it hands back are actually getting anywhere.
+    # The run can: when tab after tab dies or wedges with no folder completing in
+    # between, the browser itself is the problem, so skip the gentle rungs.
     try:
-        dead_page.close()
-    except Exception:
-        pass  # Usually already gone; a close failure changes nothing.
-    try:
-        page = engine.new_page()
-    except Exception as reopen_error:
-        log_download_message(f"Could not reopen a page after tab death: {reopen_error}")
+        if recoveries_without_progress >= RESTART_AFTER_RECOVERIES_WITHOUT_PROGRESS:
+            log_download_message(
+                f"{recoveries_without_progress} recoveries bought no progress; "
+                "restarting the browser from scratch"
+            )
+            return engine.restart_browser()
+        return engine.recover_page(dead_page)
+    except Exception as recovery_error:
+        log_download_message(f"Browser recovery failed: {recovery_error}")
         return None
-    log_download_message("Reopened a fresh page after tab death; resuming the run")
-    return page
 
 
 def _log_resource_sample(
@@ -463,6 +473,7 @@ def download_current_folder(
     folders_processed = 0
     folders_unavailable = 0
     recoveries_used = 0
+    recoveries_without_progress = 0
     last_resource_sample_at = 0.0
     cmdline_markers = browser_cmdline_markers(profile_dir, browser_debug_url)
     try:
@@ -534,9 +545,10 @@ def download_current_folder(
                         reason=str(error),
                     )
                     continue
-                except BrowserClosedError as error:
+                except (BrowserClosedError, BrowserHungError) as error:
                     recoveries_used += 1
-                    # Every tab death is evidence: capture diagnostics whether or
+                    recoveries_without_progress += 1
+                    # Every death or hang is evidence: capture diagnostics whether or
                     # not recovery succeeds.
                     _capture_browser_crash_diagnostics(
                         engine=engine,
@@ -556,9 +568,13 @@ def download_current_folder(
                             f"({TAB_DEATH_RECOVERY_LIMIT}); aborting the run"
                         )
                         raise
-                    recovered_page = _reopen_page_after_tab_death(engine, page)
+                    recovered_page = _recover_page(
+                        engine,
+                        page,
+                        recoveries_without_progress=recoveries_without_progress,
+                    )
                     if recovered_page is None:
-                        # The browser itself is gone; nothing to recover onto.
+                        # Not even a relaunched browser gave us a page to work on.
                         raise
                     page = recovered_page
                     # Retry the interrupted folder: it was blameless, and under
@@ -571,12 +587,18 @@ def download_current_folder(
                         "tab_death_recovered",
                         recoveryNumber=recoveries_used,
                         recoveryLimit=TAB_DEATH_RECOVERY_LIMIT,
+                        recoveriesWithoutProgress=recoveries_without_progress,
+                        hung=isinstance(error, BrowserHungError),
                         folderUrl=folder_task.url,
                     )
                     log_download_message(
-                        f"Recovered from tab death {recoveries_used}/"
+                        f"Recovered from browser death/hang {recoveries_used}/"
                         f"{TAB_DEATH_RECOVERY_LIMIT}; retrying folder: {folder_task.url}"
                     )
+                else:
+                    # A folder came through whole, so whatever we recovered onto is
+                    # working: stop counting toward a browser restart.
+                    recoveries_without_progress = 0
 
     except Exception as error:
         # A BrowserClosedError arriving here already wrote its crash-diagnostics

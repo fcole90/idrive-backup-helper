@@ -54,6 +54,11 @@ FOLDER_SETTLE_EMPTY_CONFIRM_CHECKS = 2
 FOLDER_LOADER_LOG_INTERVAL_SECONDS = 10
 FOLDER_LOAD_RETRY_INTERVAL_MS = 10_000
 FOLDER_LOAD_RETRY_TIMEOUT_MS = 120 * 60 * 1_000
+# A wedged page or browser fails every load the same way, so retrying it inside the
+# full folder-load window burns hours on a page that will never answer. After this
+# many load timeouts on one folder, report a hang so the caller can recycle the tab
+# (and, if that does not help, the browser) and retry from something that works.
+FOLDER_LOAD_TIMEOUT_LIMIT = 2
 # A folder IDrive refuses to open ("There is some problem. Try later.") is retried
 # only a few times with a short pause — the message claims to be transient — and
 # then skipped, instead of burning the full folder-load retry window on a folder
@@ -315,7 +320,9 @@ def wait_for_folder_view_settle(page: FolderViewPage, timeout_ms: int) -> None:
                 return
 
         if time.monotonic() >= deadline:
-            raise RuntimeError("Timed out waiting for folder loader to finish")
+            raise FolderLoadTimeoutError(
+                "Timed out waiting for folder loader to finish"
+            )
 
 
 def _read_breadcrumb_titles(page: Page) -> list[str]:
@@ -419,6 +426,15 @@ class FolderUnavailableError(RuntimeError):
     Distinct from a generic load failure so the caller retries only a few times and
     then skips the folder, instead of spending the full folder-load retry window on
     a folder the backend will not open.
+    """
+
+
+class FolderLoadTimeoutError(RuntimeError):
+    """A folder view never finished loading within the timeout.
+
+    A single one is ordinary (a slow folder, a slow network); several in a row on
+    the same page mean the page or the browser has stopped responding, which is what
+    ``FOLDER_LOAD_TIMEOUT_LIMIT`` counts.
     """
 
 
@@ -719,6 +735,20 @@ class BrowserClosedError(RuntimeError):
     """
 
 
+class BrowserHungError(RuntimeError):
+    """The page/browser is still open but has stopped answering: loads keep timing out.
+
+    Distinct from ``BrowserClosedError`` because nothing is closed — the fix is to
+    recycle the tab, and failing that the browser process — and distinct from an
+    ordinary load failure so a wedged browser is not retried for the full folder-load
+    window (two hours) before anyone notices.
+    """
+
+
+def _is_load_timeout(error: Exception) -> bool:
+    return isinstance(error, PlaywrightTimeoutError | FolderLoadTimeoutError)
+
+
 def _page_is_closed(page: Page) -> bool:
     try:
         return page.is_closed()
@@ -737,6 +767,20 @@ def _abort_if_browser_closed(page: Page, last_error: Exception) -> None:
         "Browser was closed mid-run (the tab or window was closed, or the "
         "browser crashed/exited), so folder loading cannot continue. Aborting; "
         f"the partial run journal is preserved. Last error: {last_error}"
+    ) from last_error
+
+
+def _abort_if_browser_hung(
+    timeout_failures: int, target_url: str, last_error: Exception
+) -> None:
+    # Checked only after _abort_if_browser_closed, so a browser that actually died
+    # is still reported as closed rather than hung.
+    if timeout_failures < FOLDER_LOAD_TIMEOUT_LIMIT:
+        return
+    raise BrowserHungError(
+        f"Folder loading timed out {timeout_failures} time(s) on a browser that is "
+        f"still open ({target_url}), so the page or the browser has stopped "
+        f"responding. Recycling it instead of retrying. Last error: {last_error}"
     ) from last_error
 
 
@@ -765,6 +809,7 @@ def _load_folder_with_retry(
     last_error: Exception = RuntimeError("Folder load retry exhausted")
     attempt = 1
     unavailable_attempts = 0
+    timeout_failures = 0
 
     while True:
         try:
@@ -811,9 +856,12 @@ def _load_folder_with_retry(
             continue
         except Exception as error:
             last_error = error
+            if _is_load_timeout(error):
+                timeout_failures += 1
             _log(f"Folder load attempt {attempt} failed: {error}")
 
         _abort_if_browser_closed(page, last_error)
+        _abort_if_browser_hung(timeout_failures, target_url, last_error)
 
         if time.monotonic() >= deadline:
             break
@@ -860,6 +908,7 @@ def load_folder_entries_with_retry(
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder entries retry exhausted")
     attempt = 1
+    timeout_failures = 0
 
     while True:
         try:
@@ -883,16 +932,20 @@ def load_folder_entries_with_retry(
             write_folder_entries_cache(downloads_dir, target_url, entries)
 
             return entries
-        except FolderUnavailableError:
-            # _load_folder_with_retry already exhausted its quick retries; do not
-            # spend this outer window on a folder IDrive will not open. Propagate so
-            # the caller skips it.
+        except FolderUnavailableError, BrowserHungError:
+            # Both are already-decided outcomes: _load_folder_with_retry exhausted its
+            # quick retries on a folder IDrive will not open, or the page/browser stopped
+            # responding. Neither is helped by spending this outer window on it, so
+            # propagate — the caller skips the folder, or recycles the browser.
             raise
         except Exception as error:
             last_error = error
+            if _is_load_timeout(error):
+                timeout_failures += 1
             _log(f"Folder entries attempt {attempt} failed: {error}")
 
         _abort_if_browser_closed(page, last_error)
+        _abort_if_browser_hung(timeout_failures, target_url, last_error)
 
         if time.monotonic() >= deadline:
             break

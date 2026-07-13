@@ -13,9 +13,11 @@ from idrive_backup_helper.browser.downloads.download_models import (
 )
 from idrive_backup_helper.browser.downloads.download_page import (
     BrowserClosedError,
+    BrowserHungError,
     FolderUnavailableError,
 )
 from idrive_backup_helper.browser.downloads.download_run import (
+    RESTART_AFTER_RECOVERIES_WITHOUT_PROGRESS,
     TAB_DEATH_RECOVERY_LIMIT,
     download_current_folder,
 )
@@ -27,6 +29,8 @@ class FakeBrowserEngine:
         self.config = config
         self.page = object()
         self.new_page_calls = 0
+        self.recover_calls = 0
+        self.restart_calls = 0
 
     def __enter__(self) -> "FakeBrowserEngine":
         return self
@@ -45,6 +49,14 @@ class FakeBrowserEngine:
     def new_page(self) -> object:
         # The browser is "alive": reopening a page after a tab death succeeds.
         self.new_page_calls += 1
+        return object()
+
+    def recover_page(self, dead_page: object = None) -> object:
+        self.recover_calls += 1
+        return object()
+
+    def restart_browser(self) -> object:
+        self.restart_calls += 1
         return object()
 
     def describe_browser_health(self) -> BrowserHealthReport:
@@ -600,3 +612,133 @@ def test_download_current_folder_skips_folder_idrive_refuses_to_open(
     progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
     assert '"folder_unavailable"' in progress_text
     assert '"foldersUnavailable": 1' in progress_text
+
+
+def _fake_downloads_run_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[FakeBrowserEngine]:
+    engines: list[FakeBrowserEngine] = []
+
+    def make_engine(config: object) -> FakeBrowserEngine:
+        engine = FakeBrowserEngine(config)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(download_run, "BrowserEngine", make_engine)
+    monkeypatch.setattr(
+        download_run,
+        "ensure_folder_loaded_for_download",
+        _fake_ensure_folder_loaded_for_download,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "transfer_remote_file_to_destination",
+        _fake_transfer_remote_file_to_destination,
+    )
+    return engines
+
+
+def test_download_current_folder_recovers_from_a_hung_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    load_calls = {"count": 0}
+
+    def hangs_once_then_loads(
+        page: object,
+        *,
+        downloads_dir: Path,
+        target_url: str,
+        timeout_ms: int,
+        allow_interactive_login: bool,
+        expected_folder_name: str | None,
+        use_folder_cache: bool,
+    ) -> RemoteEntries:
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            # The tab is open but no longer answering: folder loads keep timing out.
+            raise BrowserHungError("the page or the browser has stopped responding")
+        return _fake_load_folder_entries_with_retry(
+            page,
+            downloads_dir=downloads_dir,
+            target_url=target_url,
+            timeout_ms=timeout_ms,
+            allow_interactive_login=allow_interactive_login,
+            expected_folder_name=expected_folder_name,
+            use_folder_cache=use_folder_cache,
+        )
+
+    engines = _fake_downloads_run_setup(monkeypatch)
+    monkeypatch.setattr(
+        download_run, "load_folder_entries_with_retry", hangs_once_then_loads
+    )
+
+    report = download_current_folder(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        url="https://example.com/folder",
+        destination=destination,
+        headless=False,
+        timeout_ms=60_000,
+        cooldown_ms=1500,
+        overwrite="replace",
+        use_folder_cache=True,
+        resume_from_logs=False,
+    )
+
+    # A hang is recoverable: recycle the tab, retry the folder, finish the run. The
+    # first recovery is gentle — no reason to kill a browser that then works fine.
+    assert load_calls["count"] == 2
+    assert engines[0].recover_calls == 1
+    assert engines[0].restart_calls == 0
+    assert report.counts.downloaded == 2
+
+
+def test_download_current_folder_restarts_the_browser_when_recoveries_buy_no_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+
+    def always_hangs(*_args: object, **_kwargs: object) -> RemoteEntries:
+        raise BrowserHungError("the page or the browser has stopped responding")
+
+    engines = _fake_downloads_run_setup(monkeypatch)
+    monkeypatch.setattr(download_run, "load_folder_entries_with_retry", always_hangs)
+
+    with pytest.raises(BrowserHungError):
+        download_current_folder(
+            profile_dir=profile_dir,
+            downloads_dir=downloads_dir,
+            url="https://example.com/folder",
+            destination=destination,
+            headless=False,
+            timeout_ms=60_000,
+            cooldown_ms=1500,
+            overwrite="replace",
+            use_folder_cache=True,
+            resume_from_logs=False,
+        )
+
+    # Reopening a tab is tried once. When that buys no progress, the run stops
+    # reopening tabs on a sick browser and relaunches the browser itself, and it
+    # keeps doing that (rather than falling back to tabs) until the budget is spent.
+    assert engines[0].recover_calls == RESTART_AFTER_RECOVERIES_WITHOUT_PROGRESS - 1
+    assert engines[0].restart_calls == (
+        TAB_DEATH_RECOVERY_LIMIT - RESTART_AFTER_RECOVERIES_WITHOUT_PROGRESS + 1
+    )
+
+    progress_logs = list(downloads_dir.glob("download-folder-progress-*.ndjson"))
+    progress_text = "\n".join(log.read_text(encoding="utf-8") for log in progress_logs)
+    assert '"hung": true' in progress_text
