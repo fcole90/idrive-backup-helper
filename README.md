@@ -61,7 +61,27 @@ uv run main download-folder \
 | `--overwrite {skip,replace,fail}` | `skip` | How to handle already-existing files |
 | `--no-folder-cache` | off | Disable cached folder listings |
 | `--no-resume-logs` | off | Disable resume indexing from prior manifests |
+| `--exclude GLOB` | — | Skip files matching `GLOB`; repeatable, see below |
 | `--browser-debug-url URL` | — | Attach to a different Chromium remote debugging endpoint |
+
+#### Excluding files
+
+`--exclude` takes a glob and can be repeated. Matching is case-insensitive. Quote each pattern so the shell does not expand it first.
+
+```sh
+uv run main download-folder \
+  --url "https://www.idrive.com/idrive/home/<device>_<device_id>/<drive>/path/to/folder" \
+  --to "/media/<user>/<media>/<device>/path/to/folder" \
+  --exclude '*crypt*' \
+  --exclude '*.mkv' \
+  --exclude 'Videos/**'
+```
+
+- A pattern without `/` matches the file name in any folder: `*.mkv` skips every `.mkv` file.
+- A pattern with `/` matches the path relative to `--to`, anchored at its root, as in `.gitignore`. `*` stays within one folder and `**` spans any depth: `Videos/*` skips files directly in `Videos`, `Videos/**` skips everything under it, and `**/Videos/**` does the same for a `Videos` folder at any depth.
+- A leading `/`, a trailing `/`, and a leading `!` are rejected, because this tool does not support their `.gitignore` meanings. Use `[!]` to match a literal leading `!`.
+
+Excluded files are recorded as skipped in the manifest, with the pattern that matched, and are left out of its file inventory. `verify-manifest` therefore does not report them as missing, and `retry-manifest` does not download them. Excluded folders are still listed while crawling; only their files are skipped.
 
 ### 4. Check for missing files (optional)
 

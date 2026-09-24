@@ -3,6 +3,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from idrive_backup_helper.browser.downloads.download_filters import (
+    validate_exclude_pattern,
+)
 from idrive_backup_helper.browser.downloads.downloads import (
     download_current_folder,
     retry_missing_files_from_manifest,
@@ -21,6 +24,15 @@ from idrive_backup_helper.filesystem.paths import (
 )
 
 DEFAULT_TIMEOUT_MS = 120 * 60 * 1_000
+
+
+def _exclude_pattern_arg(value: str) -> str:
+    # ArgumentTypeError keeps the message; a plain ValueError would be replaced
+    # by argparse's generic "invalid value" text.
+    try:
+        return validate_exclude_pattern(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -94,6 +106,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-folder-cache",
         action="store_true",
         help="Disable cached folder listings and always re-scan folder contents",
+    )
+    download_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        type=_exclude_pattern_arg,
+        metavar="GLOB",
+        help=(
+            "Skip files matching GLOB (repeatable, case-insensitive; quote it so "
+            "the shell does not expand it). Without '/' it matches the file name "
+            "at any depth; with '/' it matches the path relative to --to, where "
+            "'*' stays within one folder and '**' spans any depth"
+        ),
     )
     download_parser.add_argument(
         "--no-resume-logs",
@@ -182,6 +207,7 @@ def _run_download_folder(
     browser_debug_url: str | None,
     no_folder_cache: bool,
     no_resume_logs: bool,
+    exclude_patterns: list[str],
 ) -> int:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
@@ -207,6 +233,7 @@ def _run_download_folder(
         browser_debug_url=effective_browser_debug_url,
         use_folder_cache=not no_folder_cache,
         resume_from_logs=not no_resume_logs,
+        exclude_patterns=exclude_patterns,
     )
 
     print(f"Destination: {destination}")
@@ -292,6 +319,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 browser_debug_url=args.browser_debug_url,
                 no_folder_cache=args.no_folder_cache,
                 no_resume_logs=args.no_resume_logs,
+                exclude_patterns=args.exclude,
             )
         if args.command == "verify-manifest":
             return _run_verify_manifest(args.manifest)

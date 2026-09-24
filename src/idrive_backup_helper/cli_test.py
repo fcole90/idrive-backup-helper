@@ -1,3 +1,5 @@
+import pytest
+
 from idrive_backup_helper.cli import DEFAULT_TIMEOUT_MS, build_parser
 
 
@@ -56,6 +58,7 @@ def test_build_parser_accepts_download_folder_command() -> None:
     assert args.overwrite == "skip"
     assert args.no_folder_cache is False
     assert args.no_resume_logs is False
+    assert args.exclude == []
     assert args.browser_debug_url is None
 
 
@@ -76,6 +79,46 @@ def test_build_parser_accepts_download_folder_resume_and_cache_overrides() -> No
     assert args.command == "download-folder"
     assert args.no_folder_cache is True
     assert args.no_resume_logs is True
+
+
+def test_build_parser_collects_repeated_download_folder_excludes() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "download-folder",
+            "--url",
+            "https://example.com/folder",
+            "--to",
+            "/tmp/output",
+            "--exclude",
+            "*crypt*",
+            "--exclude",
+            "Videos/**",
+        ]
+    )
+
+    assert args.exclude == ["*crypt*", "Videos/**"]
+
+
+def test_build_parser_rejects_unsupported_exclude_pattern(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "download-folder",
+                "--url",
+                "https://example.com/folder",
+                "--to",
+                "/tmp/output",
+                "--exclude",
+                "/Videos/*",
+            ]
+        )
+
+    assert "starts with '/'" in capsys.readouterr().err
 
 
 def test_build_parser_accepts_verify_manifest_command() -> None:

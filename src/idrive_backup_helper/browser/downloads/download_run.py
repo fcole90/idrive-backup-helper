@@ -15,6 +15,9 @@ from idrive_backup_helper.browser.downloads.download_diagnostics import (
     capture_resource_snapshot,
     render_crash_report,
 )
+from idrive_backup_helper.browser.downloads.download_filters import (
+    matching_exclude_pattern,
+)
 from idrive_backup_helper.browser.downloads.download_manifest import (
     StreamingManifestWriter,
     build_manifest_path,
@@ -215,6 +218,7 @@ def _process_folder_task(
     cooldown_ms: int,
     headless: bool,
     use_folder_cache: bool,
+    exclude_patterns: Sequence[str],
 ) -> None:
     """List one folder, queue its children, and download its missing files.
 
@@ -236,12 +240,37 @@ def _process_folder_task(
         fileCount=len(remote_entries.files),
         folderCount=len(remote_entries.folders),
     )
+    # Excluded files are recorded as skipped but never as discovered: verify and
+    # retry work from the discovered inventory, so they would otherwise report
+    # every excluded file as missing and download it after all.
+    included_files: list[tuple[RemoteFile, Path, str]] = []
+    excluded_in_folder = 0
+    for remote_file in remote_entries.files:
+        final_path = folder_task.destination / remote_file.file_name
+        relative_path = relative_path_from_destination(base_destination, final_path)
+        excluding_pattern = matching_exclude_pattern(
+            exclude_patterns,
+            file_name=remote_file.file_name,
+            relative_path=relative_path,
+        )
+        if excluding_pattern is not None:
+            manifest_writer.record_skipped(
+                SkippedFile(
+                    file_name=remote_file.file_name,
+                    reason=f"excluded by --exclude {excluding_pattern}",
+                    final_path=final_path,
+                )
+            )
+            excluded_in_folder += 1
+            continue
+        included_files.append((remote_file, final_path, relative_path))
+
     # One scandir of this folder's destination replaces a per-file stat.
     # Existence checks dominate resume runs and a stat per file is ~1s on slow
     # destinations (external USB, network mounts).
     folder_existing_names = existing_entry_names(folder_task.destination)
     _precheck_overwrite_conflicts(
-        remote_entries.files,
+        [remote_file for remote_file, _, _ in included_files],
         folder_existing_names,
         overwrite_mode,
     )
@@ -272,9 +301,7 @@ def _process_folder_task(
     # summarized in a single line per folder.
     files_to_download: list[tuple[RemoteFile, Path, str]] = []
     skipped_in_folder = 0
-    for remote_file in remote_entries.files:
-        final_path = folder_task.destination / remote_file.file_name
-        relative_path = relative_path_from_destination(base_destination, final_path)
+    for remote_file, final_path, relative_path in included_files:
         manifest_writer.record_discovered(
             ManifestFileRecord(
                 folder_url=folder_task.url,
@@ -308,16 +335,18 @@ def _process_folder_task(
         "folder_files_partitioned",
         folderUrl=folder_task.url,
         skippedExisting=skipped_in_folder,
+        excluded=excluded_in_folder,
         toDownload=len(files_to_download),
     )
+    excluded_note = f", {excluded_in_folder} excluded" if excluded_in_folder else ""
     if not files_to_download:
         log_download_message(
-            f"All {skipped_in_folder} file(s) already present in "
+            f"All {skipped_in_folder} file(s) already present{excluded_note} in "
             f"{folder_task.destination}; nothing to download"
         )
     else:
         log_download_message(
-            f"{skipped_in_folder} file(s) already present, "
+            f"{skipped_in_folder} file(s) already present{excluded_note}, "
             f"{len(files_to_download)} to download in "
             f"{folder_task.destination}"
         )
@@ -404,6 +433,7 @@ def download_current_folder(
     browser_debug_url: str | None = None,
     use_folder_cache: bool = True,
     resume_from_logs: bool = True,
+    exclude_patterns: Sequence[str] = (),
 ) -> DownloadFolderReport:
     overwrite_mode = cast(OverwriteMode, overwrite)
     destination = ensure_destination_dir(destination)
@@ -436,6 +466,7 @@ def download_current_folder(
         overwrite=overwrite_mode,
         useFolderCache=use_folder_cache,
         resumeFromLogs=resume_from_logs,
+        excludePatterns=list(exclude_patterns),
     )
 
     manifest_path = build_manifest_path(downloads_dir, started_at)
@@ -469,6 +500,7 @@ def download_current_folder(
         destination=destination,
         started_at=started_at,
         progress_log_path=progress_log_path,
+        exclude_patterns=exclude_patterns,
     )
     folders_processed = 0
     folders_unavailable = 0
@@ -528,6 +560,7 @@ def download_current_folder(
                         cooldown_ms=cooldown_ms,
                         headless=headless,
                         use_folder_cache=use_folder_cache,
+                        exclude_patterns=exclude_patterns,
                     )
                 except FolderUnavailableError as error:
                     # IDrive would not open this folder even after a few quick

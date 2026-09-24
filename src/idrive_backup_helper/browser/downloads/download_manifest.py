@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 import json
 import os
@@ -73,6 +73,7 @@ class StreamingManifestWriter:
         destination: Path,
         started_at: datetime,
         progress_log_path: Path | None,
+        exclude_patterns: Sequence[str] = (),
     ) -> None:
         self.manifest_path = manifest_path
         self._partial_path = manifest_path.with_name(manifest_path.name + ".partial")
@@ -94,6 +95,7 @@ class StreamingManifestWriter:
                 "progressLogPath": (
                     str(progress_log_path) if progress_log_path is not None else None
                 ),
+                "excludePatterns": list(exclude_patterns),
             }
         )
 

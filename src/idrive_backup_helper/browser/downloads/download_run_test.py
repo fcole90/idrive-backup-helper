@@ -215,6 +215,60 @@ def test_download_current_folder_logs_file_decisions(
     )
 
 
+def test_download_current_folder_excludes_matching_files_from_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    downloads_dir = tmp_path / "downloads"
+    profile_dir = tmp_path / "browser-state"
+    destination = tmp_path / "destination"
+    downloads_dir.mkdir(parents=True)
+    profile_dir.mkdir(parents=True)
+    destination.mkdir()
+    # Present locally, so overwrite="fail" would abort the folder if exclusion
+    # did not happen before the conflict precheck.
+    (destination / "already.txt").write_text("done", encoding="utf-8")
+
+    monkeypatch.setattr(download_run, "BrowserEngine", FakeBrowserEngine)
+    monkeypatch.setattr(
+        download_run,
+        "load_folder_entries_with_retry",
+        _fake_load_folder_entries_with_retry,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "ensure_folder_loaded_for_download",
+        _fake_ensure_folder_loaded_for_download,
+    )
+    monkeypatch.setattr(
+        download_run,
+        "transfer_remote_file_to_destination",
+        _fake_transfer_remote_file_to_destination,
+    )
+
+    report = download_current_folder(
+        profile_dir=profile_dir,
+        downloads_dir=downloads_dir,
+        url="https://example.com/folder",
+        destination=destination,
+        headless=False,
+        timeout_ms=60_000,
+        cooldown_ms=1500,
+        overwrite="fail",
+        use_folder_cache=True,
+        resume_from_logs=False,
+        exclude_patterns=["ALREADY*"],
+    )
+
+    records = _read_manifest_records(report.manifest_path)
+    assert records[0]["excludePatterns"] == ["ALREADY*"]
+    assert _file_names(records, "discovered") == ["needed.txt"]
+    assert _file_names(records, "downloaded") == ["needed.txt"]
+    skipped = [record for record in records if record.get("type") == "skipped"]
+    assert [record["fileName"] for record in skipped] == ["already.txt"]
+    assert skipped[0]["reason"] == "excluded by --exclude ALREADY*"
+
+
 def test_download_current_folder_redownloads_when_resume_success_file_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
