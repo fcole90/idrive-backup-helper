@@ -1,9 +1,10 @@
 # Workspace directory to try 
 .workspace
 
-# Local agent workspaces (task notes and scratch artifacts)
+# Local agent workspaces (task notes, scratch artifacts, retrospectives)
 .agents/tasks/
 .agents/playground/
+.agents/retro/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
