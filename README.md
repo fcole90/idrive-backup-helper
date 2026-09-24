@@ -66,22 +66,43 @@ uv run main download-folder \
 
 #### Excluding files
 
-`--exclude` takes a glob and can be repeated. Matching is case-insensitive. Quote each pattern so the shell does not expand it first.
+Use `--exclude GLOB` to skip files you do not want to download. Repeat the flag for more patterns; a file is skipped when any pattern matches it. Matching ignores case, so `*.mkv` also skips `Movie.MKV`.
+
+Always quote the pattern. Unquoted, the shell expands `*.mkv` against your current directory before the tool sees it.
 
 ```sh
 uv run main download-folder \
   --url "https://www.idrive.com/idrive/home/<device>_<device_id>/<drive>/path/to/folder" \
   --to "/media/<user>/<media>/<device>/path/to/folder" \
   --exclude '*crypt*' \
-  --exclude '*.mkv' \
-  --exclude 'Videos/**'
+  --exclude '*.mkv'
 ```
 
-- A pattern without `/` matches the file name in any folder: `*.mkv` skips every `.mkv` file.
-- A pattern with `/` matches the path relative to `--to`, anchored at its root, as in `.gitignore`. `*` stays within one folder and `**` spans any depth: `Videos/*` skips files directly in `Videos`, `Videos/**` skips everything under it, and `**/Videos/**` does the same for a `Videos` folder at any depth.
-- A leading `/`, a trailing `/`, and a leading `!` are rejected, because this tool does not support their `.gitignore` meanings. Use `[!]` to match a literal leading `!`.
+A pattern is checked against one of two things, depending on whether it contains `/`:
 
-Excluded files are recorded as skipped in the manifest, with the pattern that matched, and are left out of its file inventory. `verify-manifest` therefore does not report them as missing, and `retry-manifest` does not download them. Excluded folders are still listed while crawling; only their files are skipped.
+- **No `/`:** it is matched against the file name only, in every folder of the download.
+- **Contains `/`:** it is matched against the file's path inside the downloaded folder, the same path it gets under `--to`. The pattern starts at the top of the downloaded folder, as in `.gitignore`. `*` matches within a single folder name, and `**` matches any number of folders.
+
+| Pattern | Skips | Keeps |
+| ------- | ----- | ----- |
+| `*.mkv` | `a.mkv`, `Videos/2020/b.MKV` | `a.mp4` |
+| `*crypt*` | `notes.crypt`, `Docs/Encrypted.zip` | `notes.txt` |
+| `Videos/*` | `Videos/a.mp4` | `Videos/2020/b.mp4`, `Old/Videos/c.mp4` |
+| `Videos/**` | `Videos/a.mp4`, `Videos/2020/b.mp4` | `Old/Videos/c.mp4` |
+| `**/Videos/**` | `Videos/a.mp4`, `Old/Videos/c.mp4` | `Old/c.mp4` |
+
+Some `.gitignore` syntax is rejected with an error instead of being silently ignored, because it does not mean the same thing here:
+
+- A leading `/`: patterns containing `/` already start at the top of the downloaded folder, so write `Videos/*` instead of `/Videos/*`.
+- A trailing `/`: patterns match files, not folders, so write `Videos/**` instead of `Videos/`.
+- A leading `!`: negation is not supported. To skip files whose names start with `!`, write `**/!draft*` instead of `!draft*`.
+
+What happens to excluded files:
+
+- The manifest lists each one as skipped, with the pattern that matched, and patterns used are stored in the manifest header. They are not part of the manifest's list of expected files, so `verify-manifest` does not report them as missing and `retry-manifest` does not download them.
+- The final `Skipped:` count includes them together with files that already existed. The per-folder log line shows them separately, for example `3 file(s) already present, 2 excluded, 5 to download in ...`.
+- Folders are still opened and listed during the crawl, even when a pattern like `Videos/**` skips all of their files.
+- Manifests from runs before `--exclude` existed, or run without it, still expect those files, so `retry-manifest` on them downloads them. Rerun `download-folder` with `--exclude` instead.
 
 ### 4. Check for missing files (optional)
 

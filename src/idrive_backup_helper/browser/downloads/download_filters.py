@@ -24,7 +24,7 @@ def validate_exclude_pattern(pattern: str) -> str:
     if pattern.startswith("!"):
         raise ValueError(
             f"exclude pattern {pattern!r} starts with '!': negation is not "
-            "supported; use '[!]' to match a literal leading '!'"
+            f"supported; to match file names starting with '!', use '**/{pattern}'"
         )
     return pattern
 
