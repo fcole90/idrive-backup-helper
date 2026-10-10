@@ -9,6 +9,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Pinned to 1.62.0 in pyproject.toml: 1.63 failed to download its browser.
+      # CI never installs a browser, so an auto-merged bump would pass CI anyway.
+      - dependency-name: "playwright"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
