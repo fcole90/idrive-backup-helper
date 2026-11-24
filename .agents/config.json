@@ -1,0 +1,34 @@
+{
+  "skills": {
+    "sources": [
+      {
+        "from": "github:swiftpostlabs/agentic-tools",
+        "ref": "main",
+        "skills": [
+          "ref-sp-agents-mr-wolf-persona",
+          "ref-sp-agents-verification-discipline",
+          "ref-sp-agents-security",
+          "ref-sp-agents-instructions-authoring",
+          "ref-sp-agents-user-communication",
+          "ref-sp-agents-local-tasks",
+          "ref-sp-agents-retro",
+          "ref-sp-agents-adversarial-review",
+          "ref-sp-agents-skills-authoring",
+          "ref-sp-dev-coding-patterns",
+          "ref-sp-dev-projects-architecture",
+          "ref-sp-dev-docs-authoring",
+          "ref-sp-dev-git-commits",
+          "ref-sp-dev-semantic-versioning",
+          "ref-sp-dev-github-actions-ci",
+          "ref-sp-dev-github-dependabot",
+          "ref-sp-py-python",
+          "tool-sp-commit",
+          "tool-sp-handle-agents-local-tasks",
+          "tool-sp-run-adversarial-review",
+          "tool-sp-maintain-skills",
+          "tool-sp-migrate-agent-repo"
+        ]
+      }
+    ]
+  }
+}

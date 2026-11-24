@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "sources": {
+    "github:swiftpostlabs/agentic-tools": {
+      "ref": "main",
+      "commit": "0229d0c0f4b0befe6802d080005b33289bfacfd7"
+    }
+  }
+}
