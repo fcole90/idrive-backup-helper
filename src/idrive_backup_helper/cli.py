@@ -18,10 +18,25 @@ from idrive_backup_helper.browser.session import (
 )
 from idrive_backup_helper.filesystem.paths import (
     browser_profile_dir,
-    find_repo_root,
+    config_path,
     default_anon_log_dir,
+    find_repo_root,
     migrate_private_layout,
     runs_dir,
+)
+from idrive_backup_helper.profiles.profiles import (
+    PROFILE_COMMAND,
+    ProfileError,
+    anon_log_argv,
+    describe_profile,
+    download_argv,
+    find_latest_manifest,
+    load_profile,
+    load_profiles,
+    profile_from_args,
+    retry_argv,
+    save_profile,
+    validate_profile_name,
 )
 from idrive_backup_helper.runlog.anon_sink import open_anon_run_log
 from idrive_backup_helper.runlog.console import log, log_error, use_sink
@@ -51,6 +66,53 @@ def _add_anon_log_argument(parser: argparse.ArgumentParser) -> None:
             "lines to the terminal; the raw logs stay under .agents/local/secrets/"
         ),
     )
+
+
+def _configure_run_parser(run_parser: argparse.ArgumentParser) -> None:
+    run_parser.add_argument("--profile", required=True, help="Profile name")
+    run_parser.add_argument(
+        "--retry",
+        action="store_true",
+        help="Retry missing files from the profile's newest download manifest",
+    )
+    run_log_group = run_parser.add_mutually_exclusive_group()
+    run_log_group.add_argument(
+        "--with-anon-log",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="Write the anonymized log to DIR instead of the profile's setting",
+    )
+    run_log_group.add_argument(
+        "--raw-log",
+        action="store_true",
+        help="Print raw lines and write no anonymized log, for a run you watch yourself",
+    )
+
+
+def _configure_config_parser(config_parser: argparse.ArgumentParser) -> None:
+    config_subparsers = config_parser.add_subparsers(
+        dest="config_command", required=True
+    )
+    save_parser = config_subparsers.add_parser(
+        "save",
+        help=(
+            "Save a download-folder command as a profile: "
+            "config save NAME download-folder --url ... --to ..."
+        ),
+    )
+    save_parser.add_argument("name", help="Profile name")
+    save_parser.add_argument(
+        "run_args",
+        nargs=argparse.REMAINDER,
+        help="A download-folder command and its flags",
+    )
+    config_subparsers.add_parser("list", help="List profile names")
+    show_parser = config_subparsers.add_parser(
+        "show", help="Show a profile's settings, hiding private values"
+    )
+    show_parser.add_argument("name", help="Profile name")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -183,6 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_anon_log_argument(download_parser)
     _add_anon_log_argument(retry_parser)
+    _configure_run_parser(
+        subparsers.add_parser(
+            "run",
+            help="Run a saved download-folder profile (anonymized log on by default)",
+        )
+    )
+    _configure_config_parser(
+        subparsers.add_parser("config", help="Save, list, or inspect run profiles")
+    )
 
     return parser
 
@@ -428,6 +499,76 @@ def _main_with_anon_log(
             return 1
 
 
+def _run_config(args: argparse.Namespace) -> int:
+    repo_root = find_repo_root()
+    path = config_path(repo_root)
+    if args.config_command == "list":
+        profiles = load_profiles(path)
+        if not profiles:
+            log(
+                None,
+                "No profiles yet; save one with: config save NAME download-folder ...",
+            )
+        for name, profile in sorted(profiles.items()):
+            log(
+                None,
+                "{profile_name}: {command}",
+                profile_name=name,
+                command=profile.get("command", PROFILE_COMMAND),
+            )
+        return 0
+    if args.config_command == "show":
+        for line in describe_profile(load_profile(path, args.name)):
+            log(None, "{setting}", setting=line)
+        return 0
+    name = validate_profile_name(args.name)
+    run_args: list[str] = list(args.run_args)
+    if not run_args or run_args[0] != PROFILE_COMMAND:
+        raise ProfileError(
+            f"Give the command to save after the name: config save {name} "
+            f"{PROFILE_COMMAND} --url ... --to ..."
+        )
+    run_namespace = build_parser().parse_args(run_args)
+    profile = profile_from_args(vars(run_namespace))
+    save_profile(path, name, profile)
+    log(
+        None,
+        "Saved profile {profile_name} ({setting_count} setting(s)) to {config_file}",
+        profile_name=name,
+        setting_count=len(profile) - 1,
+        config_file=path.relative_to(repo_root),
+    )
+    return 0
+
+
+def _profile_argv(args: argparse.Namespace) -> list[str]:
+    repo_root = find_repo_root()
+    profile = load_profile(config_path(repo_root), args.profile)
+    if args.retry:
+        manifest_path = find_latest_manifest(
+            runs_dir(repo_root),
+            url=str(profile.get("url", "")),
+            destination=Path(str(profile.get("to", ""))),
+        )
+        if manifest_path is None:
+            raise ProfileError(
+                f"No download manifest found for profile {args.profile!r}; "
+                "run it once without --retry first."
+            )
+        argv = retry_argv(profile, manifest_path)
+    else:
+        argv = download_argv(profile)
+    if args.raw_log:
+        return argv
+    # A profile's values are private, so its runs log anonymized by default.
+    setting = (
+        args.with_anon_log
+        if args.with_anon_log is not None
+        else profile.get("with_anon_log", True)
+    )
+    return argv + anon_log_argv(setting)
+
+
 def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     try:
         _migrate_private_layout()
@@ -450,6 +591,10 @@ def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
                 no_resume_logs=args.no_resume_logs,
                 exclude_patterns=args.exclude,
             )
+        if args.command == "config":
+            return _run_config(args)
+        if args.command == "run":
+            return main(_profile_argv(args))
         if args.command == "verify-manifest":
             return _run_verify_manifest(args.manifest)
         if args.command == "retry-manifest":

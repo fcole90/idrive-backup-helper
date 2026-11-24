@@ -21,6 +21,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
 from idrive_backup_helper.browser.downloads.download_run_test import (
     FakeBrowserEngine,
 )
+from idrive_backup_helper import cli
 from idrive_backup_helper.cli import main
 from idrive_backup_helper.filesystem.paths import default_anon_log_dir, runs_dir
 
@@ -177,3 +178,95 @@ def test_unexpected_errors_keep_their_traceback_out_of_the_terminal(
     raw_text = raw_console.read_text(encoding="utf-8")
     assert "Traceback" in raw_text
     assert "JANES-LAPTOP" in raw_text
+
+
+def _save_profile(repo_root: Path, *extra: str) -> None:
+    destination = repo_root.parent / "Janes Backup"
+    exit_code = main(
+        [
+            "config",
+            "save",
+            "family",
+            "download-folder",
+            "--url",
+            ROOT_URL,
+            "--to",
+            str(destination),
+            "--browser-debug-url",
+            "http://127.0.0.1:9222",
+            "--no-resume-logs",
+            "--exclude",
+            "Family Holiday/**",
+            *extra,
+        ]
+    )
+    assert exit_code == 0
+
+
+def test_profile_run_logs_anonymized_by_default(
+    fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_profile(fake_repo)
+    main(["config", "show", "family"])
+    capsys.readouterr()
+
+    main(["run", "--profile", "family"])
+
+    captured = capsys.readouterr()
+    _assert_no_private(captured.out + captured.err)
+    anon_logs = list(default_anon_log_dir(fake_repo).glob("*.anon.ndjson"))
+    assert len(anon_logs) == 1
+    _assert_no_private(anon_logs[0].read_text(encoding="utf-8"))
+
+
+def test_profile_save_and_show_print_no_private_values(
+    fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_profile(fake_repo)
+    main(["config", "show", "family"])
+    main(["config", "list"])
+
+    output = capsys.readouterr().out
+    _assert_no_private(output)
+    assert "url: set" in output
+    assert "family: download-folder" in output
+
+
+def test_profile_raw_log_opts_out(
+    fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_profile(fake_repo)
+    capsys.readouterr()
+
+    main(["run", "--profile", "family", "--raw-log"])
+
+    assert "Janes Backup" in capsys.readouterr().out
+    assert not default_anon_log_dir(fake_repo).exists()
+
+
+def test_profile_retry_uses_the_newest_manifest(
+    fake_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _save_profile(fake_repo)
+    main(["run", "--profile", "family"])
+    retries: list[Path] = []
+
+    def fake_retry(*, manifest_path: Path, **_: object) -> int:
+        retries.append(manifest_path)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_retry_manifest", fake_retry)
+
+    assert main(["run", "--profile", "family", "--retry"]) == 0
+    assert len(retries) == 1
+    assert retries[0].parent == runs_dir(fake_repo)
+    assert retries[0].name.startswith("download-folder-run-")
+
+
+def test_profile_retry_without_a_manifest_fails_cleanly(
+    fake_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_profile(fake_repo)
+
+    assert main(["run", "--profile", "family", "--retry"]) == 2
+    assert "No download manifest found for profile 'family'" in capsys.readouterr().err
