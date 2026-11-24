@@ -10,7 +10,7 @@ dependencies = ["playwright==1.62.0"]
 
 [dependency-groups]
 dev = [
-  "agentic-tools @ git+https://github.com/swiftpostlab/agentic-tools.git",
+  "agentic-tools @ git+https://github.com/swiftpostlabs/agentic-tools.git",
   "poethepoet>=0.48.0",
   "pytest>=9.1.1",
   "black>=26.5.1",
