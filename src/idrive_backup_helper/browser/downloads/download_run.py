@@ -470,7 +470,6 @@ def download_current_folder(
     )
 
     manifest_path = build_manifest_path(downloads_dir, started_at)
-    repo_root = downloads_dir.parents[2]
     folder_queue: list[FolderTask] = [
         FolderTask(url=url, destination=destination, expected_folder_name=None)
     ]
@@ -495,7 +494,6 @@ def download_current_folder(
 
     manifest_writer = StreamingManifestWriter(
         manifest_path=manifest_path,
-        repo_root=repo_root,
         url=url,
         destination=destination,
         started_at=started_at,

@@ -41,7 +41,6 @@ def _new_writer(
 ) -> StreamingManifestWriter:
     return StreamingManifestWriter(
         manifest_path=manifest_path,
-        repo_root=manifest_path.parent,
         url="https://example.com/root",
         destination=destination,
         started_at=started_at,

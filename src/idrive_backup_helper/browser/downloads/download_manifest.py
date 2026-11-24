@@ -39,13 +39,6 @@ def ensure_destination_dir(destination: Path) -> Path:
     return destination
 
 
-def _serialize_path(path: Path, repo_root: Path) -> str:
-    try:
-        return str(path.relative_to(repo_root))
-    except ValueError:
-        return str(path)
-
-
 def relative_path_from_destination(base_destination: Path, final_path: Path) -> str:
     try:
         return str(final_path.relative_to(base_destination))
@@ -68,7 +61,6 @@ class StreamingManifestWriter:
         self,
         *,
         manifest_path: Path,
-        repo_root: Path,
         url: str,
         destination: Path,
         started_at: datetime,
@@ -77,7 +69,6 @@ class StreamingManifestWriter:
     ) -> None:
         self.manifest_path = manifest_path
         self._partial_path = manifest_path.with_name(manifest_path.name + ".partial")
-        self._repo_root = repo_root
         self._destination = destination
         self._discovered = 0
         self._downloaded = 0
@@ -146,7 +137,7 @@ class StreamingManifestWriter:
                 "relativePath": relative_path_from_destination(
                     self._destination, item.final_path
                 ),
-                "stagedPath": _serialize_path(item.staged_path, self._repo_root),
+                "stagedPath": str(item.staged_path),
                 "finalPath": str(item.final_path),
             }
         )

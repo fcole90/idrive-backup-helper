@@ -72,10 +72,8 @@ def retry_missing_files_from_manifest(
         target_count += 1
 
     retry_manifest_path = build_retry_manifest_path(downloads_dir, started_at)
-    repo_root = downloads_dir.parents[2]
     manifest_writer = StreamingManifestWriter(
         manifest_path=retry_manifest_path,
-        repo_root=repo_root,
         url=header.url,
         destination=header.destination,
         started_at=started_at,
