@@ -23,7 +23,6 @@ from idrive_backup_helper.browser.downloads.download_page import (
 from idrive_backup_helper.browser.downloads.download_progress import (
     ProgressEventLogger,
     build_progress_log_path,
-    log_download_message,
 )
 from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
@@ -32,6 +31,7 @@ from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 from idrive_backup_helper.filesystem.listing import DirectoryListingCache
 from idrive_backup_helper.filesystem.moves import clear_staging_dir
 from idrive_backup_helper.filesystem.paths import staging_dir_for_destination
+from idrive_backup_helper.runlog.console import log
 
 
 def retry_missing_files_from_manifest(
@@ -99,8 +99,11 @@ def retry_missing_files_from_manifest(
     staging_dir = staging_dir_for_destination(header.destination)
     cleared_staging = clear_staging_dir(staging_dir)
     if cleared_staging:
-        log_download_message(
-            f"Cleared {len(cleared_staging)} leftover staging file(s) in {staging_dir}"
+        log(
+            "download-folder",
+            "Cleared {cleared_staging_count} leftover staging file(s) in {staging_dir}",
+            cleared_staging_count=len(cleared_staging),
+            staging_dir=staging_dir,
         )
     config = BrowserConfig(
         profile_dir=profile_dir,
@@ -114,8 +117,11 @@ def retry_missing_files_from_manifest(
         with BrowserEngine(config) as engine:
             page = engine.current_page_or_new_page()
             for (folder_url, destination_dir), grouped_items in grouped_targets.items():
-                log_download_message(
-                    f"Retrying {len(grouped_items)} file(s) from folder: {folder_url}"
+                log(
+                    "download-folder",
+                    "Retrying {grouped_items_count} file(s) from folder: {folder_url}",
+                    grouped_items_count=len(grouped_items),
+                    folder_url=folder_url,
                 )
                 progress_logger.log(
                     "folder_started",

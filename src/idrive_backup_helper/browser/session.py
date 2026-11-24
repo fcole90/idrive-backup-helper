@@ -7,13 +7,10 @@ from idrive_backup_helper.browser.engine import (
     BrowserEngine,
     DEFAULT_BROWSER_DEBUG_URL,
 )
+from idrive_backup_helper.runlog.console import log
 
 DEFAULT_AUTH_URL = "https://www.idrive.com/idrive/login/loginForm"
 DEFAULT_BROWSE_URL = "https://www.idrive.com/idrive/home"
-
-
-def _log(message: str) -> None:
-    print(f"[browser-session] {message}", flush=True)
 
 
 def requires_login(url: str) -> bool:
@@ -36,15 +33,21 @@ def ensure_authenticated_page(
             "Re-run with --headed and complete 2FA in the opened browser."
         )
 
-    _log(f"Interactive login required; current page is: {page.url}")
+    log(
+        "browser-session",
+        "Interactive login required; current page is: {page_url}",
+        page_url=page.url,
+    )
     input(
         "IDrive needs login/2FA in this browser window. Complete it there, "
         "then press Enter here to continue: "
     )
 
     if requires_login(page.url):
-        _log(
-            f"Still on login page after prompt; navigating back to target: {target_url}"
+        log(
+            "browser-session",
+            "Still on login page after prompt; navigating back to target: {target_url}",
+            target_url=target_url,
         )
         page.goto(target_url, wait_until="domcontentloaded")
 
@@ -84,5 +87,7 @@ def open_authenticated_browser(
 
     with BrowserEngine(config) as engine:
         page = engine.current_page_or_new_page()
-        _log(f"Navigating browser to: {start_url}")
+        log(
+            "browser-session", "Navigating browser to: {start_url}", start_url=start_url
+        )
         page.goto(start_url, wait_until="domcontentloaded")

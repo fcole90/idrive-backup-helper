@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
@@ -22,6 +23,7 @@ from idrive_backup_helper.browser.downloads.download_run import (
     download_current_folder,
 )
 from idrive_backup_helper.browser.engine import BrowserHealthReport
+from idrive_backup_helper.runlog.console import ConsoleLine, use_sink
 
 
 class FakeBrowserEngine:
@@ -192,20 +194,27 @@ def test_download_current_folder_logs_file_decisions(
         "transfer_remote_file_to_destination",
         _fake_transfer_remote_file_to_destination,
     )
-    monkeypatch.setattr(download_run, "log_download_message", messages.append)
 
-    download_current_folder(
-        profile_dir=profile_dir,
-        downloads_dir=downloads_dir,
-        url=folder_url,
-        destination=destination,
-        headless=False,
-        timeout_ms=60_000,
-        cooldown_ms=1500,
-        overwrite="skip",
-        use_folder_cache=True,
-        resume_from_logs=False,
-    )
+    class RecordingSink:
+        def console(self, line: ConsoleLine) -> None:
+            messages.append(line.render())
+
+        def progress(self, payload: Mapping[str, object]) -> None:
+            pass
+
+    with use_sink(RecordingSink()):
+        download_current_folder(
+            profile_dir=profile_dir,
+            downloads_dir=downloads_dir,
+            url=folder_url,
+            destination=destination,
+            headless=False,
+            timeout_ms=60_000,
+            cooldown_ms=1500,
+            overwrite="skip",
+            use_folder_cache=True,
+            resume_from_logs=False,
+        )
 
     assert any(
         message.startswith("1 file(s) already present, 1 to download in")

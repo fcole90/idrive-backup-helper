@@ -20,6 +20,7 @@ from playwright.sync_api import (
     Playwright,
     sync_playwright,
 )
+from idrive_backup_helper.runlog.console import log
 
 DEFAULT_BROWSER_DEBUG_URL = "http://127.0.0.1:9222"
 CDP_LAUNCH_TIMEOUT_SECONDS = 15.0
@@ -45,10 +46,6 @@ DETACHED_CHROMIUM_STARTUP_FLAGS = (
 _PROC_GONE = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
 
 
-def _log(message: str) -> None:
-    print(f"[browser-session] {message}", flush=True)
-
-
 def _first_error_line(error: Error) -> str:
     return str(error).splitlines()[0]
 
@@ -67,9 +64,10 @@ def ensure_playwright_chromium_executable(playwright: Playwright) -> Path:
     executable_path = ensure_browser_executable(
         Path(playwright.chromium.executable_path)
     )
-    _log(
-        "Using Playwright-managed Chromium package executable "
-        f"(Linux binary name may be 'chrome'): {executable_path}"
+    log(
+        "browser-session",
+        "Using Playwright-managed Chromium package executable (Linux binary name may be 'chrome'): {executable_path}",
+        executable_path=executable_path,
     )
     return executable_path
 
@@ -263,10 +261,12 @@ class BrowserEngine:
 
         if self._config.browser_debug_url is None:
             chromium_executable = ensure_playwright_chromium_executable(playwright)
-            _log(
-                "Launching owned persistent browser context "
-                f"(headless={self._config.headless}, profile={self._config.profile_dir}, "
-                f"downloads={self._config.staging_dir})"
+            log(
+                "browser-session",
+                "Launching owned persistent browser context (headless={headless}, profile={profile_dir}, downloads={staging_dir})",
+                headless=self._config.headless,
+                profile_dir=self._config.profile_dir,
+                staging_dir=self._config.staging_dir,
             )
             return playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self._config.profile_dir),
@@ -278,9 +278,10 @@ class BrowserEngine:
 
         self._browser = self._connect_or_launch_browser(playwright)
         browser_context = self._default_browser_context(self._browser)
-        _log(
-            "Using detached browser context "
-            f"with {len(browser_context.pages)} existing page(s)"
+        log(
+            "browser-session",
+            "Using detached browser context with {pages_count} existing page(s)",
+            pages_count=len(browser_context.pages),
         )
         return browser_context
 
@@ -291,10 +292,10 @@ class BrowserEngine:
         traceback: TracebackType | None,
     ) -> None:
         if self._browser_context is not None and self._browser is None:
-            _log("Closing owned browser context")
+            log("browser-session", "Closing owned browser context")
             self._browser_context.close()
         elif self._browser is not None:
-            _log("Command finished; leaving detached browser running")
+            log("browser-session", "Command finished; leaving detached browser running")
 
         self._playwright_context.__exit__(exc_type, exc, traceback)
 
@@ -351,7 +352,7 @@ class BrowserEngine:
         if self._browser_context is None:
             raise RuntimeError("BrowserEngine must be entered before creating a page.")
 
-        _log("Opening new page in browser context")
+        log("browser-session", "Opening new page in browser context")
         return self._browser_context.new_page()
 
     def current_page_or_new_page(self) -> Page:
@@ -361,10 +362,14 @@ class BrowserEngine:
         pages = self._browser_context.pages
         if pages:
             page = pages[-1]
-            _log(f"Reusing existing browser page: {page.url}")
+            log(
+                "browser-session",
+                "Reusing existing browser page: {page_url}",
+                page_url=page.url,
+            )
             return page
 
-        _log("No existing browser page found; opening new page")
+        log("browser-session", "No existing browser page found; opening new page")
         return self._browser_context.new_page()
 
     def close_other_pages(self, keep: Page) -> int:
@@ -387,12 +392,20 @@ class BrowserEngine:
                     continue
                 tab.close()
             except Exception as error:
-                _log(f"Could not close leftover tab: {error}")
+                log(
+                    "browser-session",
+                    "Could not close leftover tab: {error}",
+                    error=error,
+                )
                 continue
             closed_count += 1
 
         if closed_count:
-            _log(f"Closed {closed_count} leftover tab(s)")
+            log(
+                "browser-session",
+                "Closed {closed_count} leftover tab(s)",
+                closed_count=closed_count,
+            )
         return closed_count
 
     def recover_page(self, dead_page: Page | None = None) -> Page:
@@ -413,7 +426,10 @@ class BrowserEngine:
 
         page = self._new_page_or_none()
         if page is not None:
-            _log("Recovered on the existing browser connection with a fresh tab")
+            log(
+                "browser-session",
+                "Recovered on the existing browser connection with a fresh tab",
+            )
             self.close_other_pages(keep=page)
             return page
 
@@ -431,28 +447,36 @@ class BrowserEngine:
         The profile survives the restart, so the IDrive session survives with it and
         the run resumes without a new login.
         """
-        _log("Restarting the browser from scratch")
+        log("browser-session", "Restarting the browser from scratch")
         self._discard_playwright_browser()
 
         terminated_count = terminate_browser_processes_on_profile(
             self._config.profile_dir
         )
         if terminated_count:
-            _log(f"Terminated {terminated_count} browser process(es) on the profile")
+            log(
+                "browser-session",
+                "Terminated {terminated_count} browser process(es) on the profile",
+                terminated_count=terminated_count,
+            )
 
         removed_lock_paths = remove_stale_browser_profile_lock_files(
             self._config.profile_dir
         )
         if removed_lock_paths:
             removed_names = ", ".join(path.name for path in removed_lock_paths)
-            _log(f"Removed stale Chromium profile lock file(s): {removed_names}")
+            log(
+                "browser-session",
+                "Removed stale Chromium profile lock file(s): {lock_files}",
+                lock_files=removed_names,
+            )
 
         browser_context = self._open_browser_context()
         browser_context.set_default_timeout(self._config.timeout_ms)
         self._browser_context = browser_context
 
         page = browser_context.new_page()
-        _log("Browser relaunched; recovered onto a fresh page")
+        log("browser-session", "Browser relaunched; recovered onto a fresh page")
         self.close_other_pages(keep=page)
         return page
 
@@ -463,7 +487,11 @@ class BrowserEngine:
         try:
             return self._browser_context.new_page()
         except Exception as error:
-            _log(f"Could not open a tab on the existing connection: {error}")
+            log(
+                "browser-session",
+                "Could not open a tab on the existing connection: {error}",
+                error=error,
+            )
             return None
 
     def _reattach_over_cdp_or_none(self) -> Page | None:
@@ -476,15 +504,18 @@ class BrowserEngine:
             endpoint_url, timeout_seconds=CDP_RECOVERY_WAIT_SECONDS
         )
         if cdp_version is None:
-            _log(
-                "CDP endpoint stayed silent for "
-                f"{CDP_RECOVERY_WAIT_SECONDS:.0f}s: {endpoint_url}"
+            log(
+                "browser-session",
+                "CDP endpoint stayed silent for {wait_seconds:.0f}s: {endpoint_url}",
+                wait_seconds=CDP_RECOVERY_WAIT_SECONDS,
+                endpoint_url=endpoint_url,
             )
             return None
 
-        _log(
-            f"CDP endpoint still answers ({cdp_version}); the browser is alive and "
-            "only our connection to it dropped. Reattaching."
+        log(
+            "browser-session",
+            "CDP endpoint still answers ({cdp_version}); the browser is alive and only our connection to it dropped. Reattaching.",
+            cdp_version=cdp_version,
         )
         self._discard_playwright_browser()
         try:
@@ -496,12 +527,12 @@ class BrowserEngine:
             browser_context.set_default_timeout(self._config.timeout_ms)
             page = browser_context.new_page()
         except (Error, RuntimeError) as error:
-            _log(f"Reattaching over CDP failed: {error}")
+            log("browser-session", "Reattaching over CDP failed: {error}", error=error)
             return None
 
         self._browser = browser
         self._browser_context = browser_context
-        _log("Reattached to the running browser")
+        log("browser-session", "Reattached to the running browser")
         return page
 
     def _discard_playwright_browser(self) -> None:
@@ -525,20 +556,28 @@ class BrowserEngine:
         if self._config.browser_debug_url is None:
             raise RuntimeError("Cannot attach without a browser debug endpoint.")
 
-        _log(f"Connecting to Chromium CDP endpoint: {self._config.browser_debug_url}")
+        log(
+            "browser-session",
+            "Connecting to Chromium CDP endpoint: {browser_debug_url}",
+            browser_debug_url=self._config.browser_debug_url,
+        )
         try:
             browser = playwright.chromium.connect_over_cdp(
                 self._config.browser_debug_url,
                 timeout=CDP_CONNECT_TIMEOUT_MS,
             )
-            _log(
-                f"Attached to existing Chromium CDP endpoint: {self._config.browser_debug_url}"
+            log(
+                "browser-session",
+                "Attached to existing Chromium CDP endpoint: {browser_debug_url}",
+                browser_debug_url=self._config.browser_debug_url,
             )
             return browser
         except Error as error:
-            _log(
-                "CDP connection failed; launching detached Chromium "
-                f"({self._config.browser_debug_url}): {_first_error_line(error)}"
+            log(
+                "browser-session",
+                "CDP connection failed; launching detached Chromium ({browser_debug_url}): {error}",
+                browser_debug_url=self._config.browser_debug_url,
+                error=_first_error_line(error),
             )
             launch = self._launch_detached_browser(playwright)
             self._detached_launch = launch
@@ -552,8 +591,10 @@ class BrowserEngine:
                 self._config.browser_debug_url,
                 timeout=CDP_CONNECT_TIMEOUT_MS,
             )
-            _log(
-                f"Attached to launched Chromium CDP endpoint: {self._config.browser_debug_url}"
+            log(
+                "browser-session",
+                "Attached to launched Chromium CDP endpoint: {browser_debug_url}",
+                browser_debug_url=self._config.browser_debug_url,
             )
             return browser
 
@@ -568,7 +609,11 @@ class BrowserEngine:
         )
         if removed_lock_paths:
             removed_names = ", ".join(path.name for path in removed_lock_paths)
-            _log(f"Removed stale Chromium profile lock file(s): {removed_names}")
+            log(
+                "browser-session",
+                "Removed stale Chromium profile lock file(s): {lock_files}",
+                lock_files=removed_names,
+            )
 
         args = [
             str(chromium_executable),
@@ -590,10 +635,12 @@ class BrowserEngine:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        _log(
-            "Detached Chromium launched "
-            f"(pid={browser_process.pid}, profile={self._config.profile_dir}, "
-            f"startup_log={startup_log_path})"
+        log(
+            "browser-session",
+            "Detached Chromium launched (pid={pid}, profile={profile_dir}, startup_log={startup_log_path})",
+            pid=browser_process.pid,
+            profile_dir=self._config.profile_dir,
+            startup_log_path=startup_log_path,
         )
         return DetachedBrowserLaunch(process=browser_process, log_path=startup_log_path)
 
@@ -638,7 +685,12 @@ def _wait_for_cdp_version(endpoint_url: str, *, timeout_seconds: float) -> str |
     # can be too busy to answer for seconds at a time while still being perfectly
     # alive, and treating that as death would kill a browser worth keeping.
     deadline = time.monotonic() + timeout_seconds
-    _log(f"Probing CDP endpoint for up to {timeout_seconds:.0f}s: {endpoint_url}")
+    log(
+        "browser-session",
+        "Probing CDP endpoint for up to {timeout_seconds:.0f}s: {endpoint_url}",
+        timeout_seconds=timeout_seconds,
+        endpoint_url=endpoint_url,
+    )
     while True:
         cdp_version = _probe_cdp_version(endpoint_url)
         if cdp_version is not None:
@@ -659,11 +711,19 @@ def _wait_for_cdp_endpoint(
     deadline = time.monotonic() + timeout_seconds
     last_error: OSError | URLError | TimeoutError | None = None
 
-    _log(f"Waiting for CDP endpoint readiness: {version_url}")
+    log(
+        "browser-session",
+        "Waiting for CDP endpoint readiness: {version_url}",
+        version_url=version_url,
+    )
     while time.monotonic() < deadline:
         try:
             with urlopen(version_url, timeout=1):
-                _log(f"CDP endpoint is ready: {endpoint_url}")
+                log(
+                    "browser-session",
+                    "CDP endpoint is ready: {endpoint_url}",
+                    endpoint_url=endpoint_url,
+                )
                 return
         except (OSError, URLError, TimeoutError) as error:
             last_error = error

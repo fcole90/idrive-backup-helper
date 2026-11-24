@@ -1,5 +1,4 @@
 import argparse
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from idrive_backup_helper.filesystem.paths import (
     migrate_private_layout,
     runs_dir,
 )
+from idrive_backup_helper.runlog.console import log, log_error
 
 DEFAULT_TIMEOUT_MS = 120 * 60 * 1_000
 
@@ -177,10 +177,15 @@ def _run_auth(url: str, browser_debug_url: str) -> None:
         browser_debug_url=browser_debug_url,
     )
 
-    print(f"Opened persistent browser session at: {browser_debug_url}")
-    print(f"Browser state path: {profile_dir}")
-    print(
-        "Next step: uv run main browse or uv run main download-folder --url <FOLDER_URL> --to <DEST_PATH>"
+    log(
+        None,
+        "Opened persistent browser session at: {browser_debug_url}",
+        browser_debug_url=browser_debug_url,
+    )
+    log(None, "Browser state path: {profile_dir}", profile_dir=profile_dir)
+    log(
+        None,
+        "Next step: uv run main browse or uv run main download-folder --url <FOLDER_URL> --to <DEST_PATH>",
     )
 
 
@@ -194,7 +199,11 @@ def _run_browse(url: str, browser_debug_url: str) -> None:
         start_url=url,
         browser_debug_url=browser_debug_url,
     )
-    print(f"Opened persistent browser session at: {browser_debug_url}")
+    log(
+        None,
+        "Opened persistent browser session at: {browser_debug_url}",
+        browser_debug_url=browser_debug_url,
+    )
 
 
 def _run_download_folder(
@@ -237,24 +246,40 @@ def _run_download_folder(
         exclude_patterns=exclude_patterns,
     )
 
-    print(f"Destination: {destination}")
-    print(f"Downloaded: {report.counts.downloaded}")
-    print(f"Skipped: {report.counts.skipped}")
-    print(f"Failed: {report.counts.failed}")
+    log(None, "Destination: {destination}", destination=destination)
+    log(None, "Downloaded: {downloaded}", downloaded=report.counts.downloaded)
+    log(None, "Skipped: {skipped}", skipped=report.counts.skipped)
+    log(None, "Failed: {failed}", failed=report.counts.failed)
     if report.folders_unavailable:
-        print(f"Unavailable folders (skipped): {report.folders_unavailable}")
+        log(
+            None,
+            "Unavailable folders (skipped): {folders_unavailable}",
+            folders_unavailable=report.folders_unavailable,
+        )
     if report.progress_log_path is not None:
-        print(f"Progress log: {report.progress_log_path}")
-    print(f"Manifest: {report.manifest_path}")
+        log(
+            None,
+            "Progress log: {progress_log_path}",
+            progress_log_path=report.progress_log_path,
+        )
+    log(None, "Manifest: {manifest_path}", manifest_path=report.manifest_path)
     return report.exit_code
 
 
 def _run_verify_manifest(manifest_path: Path) -> int:
     verification = verify_download_manifest(manifest_path)
-    print(f"Manifest: {manifest_path}")
-    print(f"Expected files: {verification.expected_files}")
-    print(f"Present files: {verification.present_files}")
-    print(f"Missing files: {verification.missing_files}")
+    log(None, "Manifest: {manifest_path}", manifest_path=manifest_path)
+    log(
+        None,
+        "Expected files: {expected_files}",
+        expected_files=verification.expected_files,
+    )
+    log(
+        None, "Present files: {present_files}", present_files=verification.present_files
+    )
+    log(
+        None, "Missing files: {missing_files}", missing_files=verification.missing_files
+    )
     return verification.exit_code
 
 
@@ -289,21 +314,27 @@ def _run_retry_manifest(
         overwrite=overwrite,
         browser_debug_url=effective_browser_debug_url,
     )
-    print(f"Manifest: {report.manifest_path}")
-    print(f"Retried downloads: {report.counts.downloaded}")
-    print(f"Skipped: {report.counts.skipped}")
-    print(f"Failed: {report.counts.failed}")
+    log(None, "Manifest: {manifest_path}", manifest_path=report.manifest_path)
+    log(None, "Retried downloads: {downloaded}", downloaded=report.counts.downloaded)
+    log(None, "Skipped: {skipped}", skipped=report.counts.skipped)
+    log(None, "Failed: {failed}", failed=report.counts.failed)
     if report.progress_log_path is not None:
-        print(f"Progress log: {report.progress_log_path}")
+        log(
+            None,
+            "Progress log: {progress_log_path}",
+            progress_log_path=report.progress_log_path,
+        )
     return report.exit_code
 
 
 def _migrate_private_layout() -> None:
     repo_root = find_repo_root()
     for old, new in migrate_private_layout(repo_root):
-        print(
-            f"Moved {old.relative_to(repo_root)} to {new.relative_to(repo_root)} "
-            "(private data now lives under a protected secrets/ folder)"
+        log(
+            None,
+            "Moved {old_path} to {new_path} (private data now lives under a protected secrets/ folder)",
+            old_path=old.relative_to(repo_root),
+            new_path=new.relative_to(repo_root),
         )
 
 
@@ -344,7 +375,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 browser_debug_url=args.browser_debug_url,
             )
     except RuntimeError as error:
-        print(str(error), file=sys.stderr)
+        log_error("{error}", error=str(error))
         return 2
 
     parser.error(f"Unsupported command: {args.command}")

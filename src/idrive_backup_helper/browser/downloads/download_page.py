@@ -40,6 +40,7 @@ from idrive_backup_helper.browser.downloads.download_models import (
     RemoteFolder,
 )
 from idrive_backup_helper.browser.session import ensure_authenticated_page
+from idrive_backup_helper.runlog.console import log
 
 # Settle polling backs off instead of waiting a fixed ~10s per folder: check at
 # ~1s, then 2/4/8s, then cap at 10s until the folder is ready. A fast folder
@@ -91,10 +92,6 @@ FOLDER_CLICK_SETTLE_MAX_MS = 1_800
 type SelectorState = Literal["attached", "detached", "hidden", "visible"]
 
 
-def _log(message: str) -> None:
-    print(f"[download-folder] {message}", flush=True)
-
-
 class FolderViewPage(Protocol):
     def wait_for_selector(
         self,
@@ -123,7 +120,12 @@ def _load_js_asset(name: str) -> str:
 
     script = asset_path.read_text(encoding="utf-8")
     digest = hashlib.sha256(script.encode("utf-8")).hexdigest()[:12]
-    _log(f"Loaded browser script asset: {asset_path.name} sha256={digest}")
+    log(
+        "download-folder",
+        "Loaded browser script asset: {asset_path_name} sha256={digest}",
+        asset_path_name=asset_path.name,
+        digest=digest,
+    )
     return script
 
 
@@ -296,26 +298,29 @@ def wait_for_folder_view_settle(page: FolderViewPage, timeout_ms: int) -> None:
             empty_checks = 0
             if now >= next_loader_log_at:
                 seconds_remaining = max(0, int(deadline - now))
-                _log(
-                    "Folder loader still visible; waiting "
-                    f"({view_state.content_row_count} content row(s), "
-                    f"{view_state.total_row_count} total row(s), "
-                    f"{seconds_remaining}s remaining)"
+                log(
+                    "download-folder",
+                    "Folder loader still visible; waiting ({content_row_count} content row(s), {total_row_count} total row(s), {seconds_remaining}s remaining)",
+                    content_row_count=view_state.content_row_count,
+                    total_row_count=view_state.total_row_count,
+                    seconds_remaining=seconds_remaining,
                 )
                 next_loader_log_at = now + FOLDER_LOADER_LOG_INTERVAL_SECONDS
         elif view_state.content_row_count > 0:
-            _log(
-                "Folder view settled "
-                f"({view_state.content_row_count} content row(s), "
-                f"{view_state.total_row_count} total row(s))"
+            log(
+                "download-folder",
+                "Folder view settled ({content_row_count} content row(s), {total_row_count} total row(s))",
+                content_row_count=view_state.content_row_count,
+                total_row_count=view_state.total_row_count,
             )
             return
         else:
             empty_checks += 1
             if empty_checks >= FOLDER_SETTLE_EMPTY_CONFIRM_CHECKS:
-                _log(
-                    "Folder view settled empty after "
-                    f"{empty_checks} check(s) (0 content row(s))"
+                log(
+                    "download-folder",
+                    "Folder view settled empty after {empty_checks} check(s) (0 content row(s))",
+                    empty_checks=empty_checks,
                 )
                 return
 
@@ -408,10 +413,13 @@ def _ensure_expected_folder_loaded(
     # miss can be diagnosed (e.g. whether the URL moved to the target while the view
     # stayed on the parent, or the banner simply never rendered).
     joined_titles = "/".join(breadcrumb_titles) if breadcrumb_titles else "<empty>"
-    _log(
-        f"Folder '{expected_folder_name}' did not load and no error banner appeared "
-        f"within {FOLDER_OUTCOME_POLL_MS // 1000}s. Tab URL: {page.url}; "
-        f"breadcrumb: {joined_titles}"
+    log(
+        "download-folder",
+        "Folder '{expected_folder_name}' did not load and no error banner appeared within {poll_seconds}s. Tab URL: {page_url}; breadcrumb: {breadcrumb_path}",
+        expected_folder_name=expected_folder_name,
+        poll_seconds=FOLDER_OUTCOME_POLL_MS // 1000,
+        page_url=page.url,
+        breadcrumb_path=joined_titles,
     )
     raise RuntimeError(
         "Loaded folder does not match expected path segment "
@@ -469,7 +477,12 @@ def _decode_html_entities_in_href(href: str) -> str:
     # their characters before any URL parsing so the full path survives.
     decoded = html.unescape(href)
     if decoded != href:
-        _log(f"Decoded HTML entities in folder href: {href!r} -> {decoded!r}")
+        log(
+            "download-folder",
+            "Decoded HTML entities in folder href: {href!r} -> {decoded_href!r}",
+            href=href,
+            decoded_href=decoded,
+        )
     return decoded
 
 
@@ -483,7 +496,11 @@ def normalize_folder_href(href: str) -> str:
     if not unquote(parsed.path).startswith(IDRIVE_HOME_PATH * 2):
         return href
     fixed_path = parsed.path[len(IDRIVE_HOME_PATH) :]
-    _log(f"Corrected doubled IDrive home prefix in href: {href!r}")
+    log(
+        "download-folder",
+        "Corrected doubled IDrive home prefix in href: {href!r}",
+        href=href,
+    )
     return urlunparse((parsed.scheme, parsed.netloc, fixed_path, "", "", ""))
 
 
@@ -639,14 +656,20 @@ def _plan_navigation_reading_breadcrumb(
 def navigate_to_folder_with_clicks(
     page: Page, target_url: str, timeout_ms: int
 ) -> None:
-    _log(
-        "IDrive navigation implementation "
-        f"{IDRIVE_NAVIGATION_BUILD_ID} from {Path(__file__).resolve()}"
+    log(
+        "download-folder",
+        "IDrive navigation implementation {build_id} from {module_path}",
+        build_id=IDRIVE_NAVIGATION_BUILD_ID,
+        module_path=Path(__file__).resolve(),
     )
     path_parts = idrive_folder_path_parts(target_url)
     _ensure_idrive_click_path(target_url, path_parts)
     if not path_parts:
-        _log(f"Navigating folder page directly: {target_url}")
+        log(
+            "download-folder",
+            "Navigating folder page directly: {target_url}",
+            target_url=target_url,
+        )
         page.goto(target_url, wait_until="domcontentloaded")
         return
 
@@ -655,7 +678,11 @@ def navigate_to_folder_with_clicks(
         for index, path_part in enumerate(path_parts)
     ]
     if is_idrive_url(target_url):
-        _log(f"Resolved IDrive click path: {' / '.join(target_display_parts)}")
+        log(
+            "download-folder",
+            "Resolved IDrive click path: {target_display_path}",
+            target_display_path=" / ".join(target_display_parts),
+        )
 
     plan = _plan_navigation_reading_breadcrumb(page, path_parts)
     # No shared ancestor is clickable yet: climb to the shallowest visible crumb to
@@ -667,12 +694,16 @@ def navigate_to_folder_with_clicks(
         assert plan.hop_address_index is not None
         climbs += 1
         if climbs > len(path_parts) + 1:
-            _log("Breadcrumb climb is not converging; restarting from home")
+            log(
+                "download-folder",
+                "Breadcrumb climb is not converging; restarting from home",
+            )
             plan = NavigationPlan(action="go_home", start_index=0)
             break
-        _log(
-            "Climbing to shallowest visible breadcrumb crumb "
-            f"(addressindex {plan.hop_address_index}) to reveal a shared ancestor"
+        log(
+            "download-folder",
+            "Climbing to shallowest visible breadcrumb crumb (addressindex {hop_address_index}) to reveal a shared ancestor",
+            hop_address_index=plan.hop_address_index,
         )
         _click_breadcrumb_by_index(page, plan.hop_address_index)
         page.wait_for_timeout(_human_delay_ms())
@@ -684,23 +715,36 @@ def navigate_to_folder_with_clicks(
     if plan.action == "go_home":
         home_url = idrive_home_url(target_url)
         if is_current_folder_url(page.url, home_url):
-            _log(f"Current tab is already at IDrive home: {home_url}")
+            log(
+                "download-folder",
+                "Current tab is already at IDrive home: {home_url}",
+                home_url=home_url,
+            )
         else:
-            _log(f"Navigating to IDrive home before folder clicks: {home_url}")
+            log(
+                "download-folder",
+                "Navigating to IDrive home before folder clicks: {home_url}",
+                home_url=home_url,
+            )
             page.goto(home_url, wait_until="domcontentloaded")
             page.wait_for_timeout(_human_delay_ms())
     elif plan.action == "breadcrumb_up":
         assert plan.hop_address_index is not None
-        _log(
-            "Traversing up via breadcrumb to common ancestor: "
-            f"{target_display_parts[plan.hop_address_index]} "
-            f"(addressindex {plan.hop_address_index})"
+        log(
+            "download-folder",
+            "Traversing up via breadcrumb to common ancestor: {hop_folder_name} (addressindex {hop_address_index})",
+            hop_folder_name=target_display_parts[plan.hop_address_index],
+            hop_address_index=plan.hop_address_index,
         )
         _click_breadcrumb_by_index(page, plan.hop_address_index)
         page.wait_for_timeout(_human_delay_ms())
     elif start_index > 0:
         current_prefix = " / ".join(target_display_parts[:start_index])
-        _log(f"Current tab is already at IDrive path prefix: {current_prefix}")
+        log(
+            "download-folder",
+            "Current tab is already at IDrive path prefix: {current_prefix_path}",
+            current_prefix_path=current_prefix,
+        )
 
     click_folder_script = _load_js_asset("click_folder_by_name.js")
     for index, folder_name in enumerate(path_parts[start_index:], start=start_index):
@@ -708,11 +752,17 @@ def navigate_to_folder_with_clicks(
         display_folder_name = folder_name_candidates[0]
         wait_for_folder_view_settle(page, timeout_ms)
         if display_folder_name == folder_name:
-            _log(f"Opening folder via UI click: {folder_name}")
+            log(
+                "download-folder",
+                "Opening folder via UI click: {folder_name}",
+                folder_name=folder_name,
+            )
         else:
-            _log(
-                "Opening folder via UI click: "
-                f"{display_folder_name} (URL segment: {folder_name})"
+            log(
+                "download-folder",
+                "Opening folder via UI click: {display_folder_name} (URL segment: {folder_name})",
+                display_folder_name=display_folder_name,
+                folder_name=folder_name,
             )
         click_result: object = page.evaluate(
             click_folder_script,
@@ -813,19 +863,34 @@ def _load_folder_with_retry(
 
     while True:
         try:
-            _log(
-                f"Loading folder attempt {attempt}: {target_url}"
-                + (
-                    f" (expecting '{expected_folder_name}')"
-                    if expected_folder_name is not None
-                    else ""
+            if expected_folder_name is None:
+                log(
+                    "download-folder",
+                    "Loading folder attempt {attempt}: {target_url}",
+                    attempt=attempt,
+                    target_url=target_url,
                 )
-            )
-            if is_current_folder_url(page.url, target_url):
-                _log(f"Current tab is already at target folder: {target_url}")
             else:
-                _log(
-                    f"Navigating folder page by UI clicks from {page.url} to {target_url}"
+                log(
+                    "download-folder",
+                    "Loading folder attempt {attempt}: {target_url} "
+                    "(expecting '{expected_folder_name}')",
+                    attempt=attempt,
+                    target_url=target_url,
+                    expected_folder_name=expected_folder_name,
+                )
+            if is_current_folder_url(page.url, target_url):
+                log(
+                    "download-folder",
+                    "Current tab is already at target folder: {target_url}",
+                    target_url=target_url,
+                )
+            else:
+                log(
+                    "download-folder",
+                    "Navigating folder page by UI clicks from {page_url} to {target_url}",
+                    page_url=page.url,
+                    target_url=target_url,
                 )
                 navigate_to_folder_with_clicks(page, target_url, timeout_ms)
             ensure_authenticated_page(
@@ -835,7 +900,12 @@ def _load_folder_with_retry(
             )
             wait_for_folder_view_settle(page, timeout_ms)
             _ensure_expected_folder_loaded(page, expected_folder_name)
-            _log(f"Folder load succeeded on attempt {attempt}: {target_url}")
+            log(
+                "download-folder",
+                "Folder load succeeded on attempt {attempt}: {target_url}",
+                attempt=attempt,
+                target_url=target_url,
+            )
             return
         except FolderUnavailableError as error:
             # IDrive actively refused to open the folder. Give it only a few quick
@@ -844,10 +914,13 @@ def _load_folder_with_retry(
             last_error = error
             unavailable_attempts += 1
             _abort_if_browser_closed(page, error)
-            _log(
-                "Folder unavailable "
-                f"(attempt {unavailable_attempts}/{FOLDER_UNAVAILABLE_RETRY_LIMIT}): "
-                f"{target_url} ({error})"
+            log(
+                "download-folder",
+                "Folder unavailable (attempt {unavailable_attempts}/{retry_limit}): {target_url} ({error})",
+                unavailable_attempts=unavailable_attempts,
+                retry_limit=FOLDER_UNAVAILABLE_RETRY_LIMIT,
+                target_url=target_url,
+                error=error,
             )
             if unavailable_attempts >= FOLDER_UNAVAILABLE_RETRY_LIMIT:
                 raise
@@ -858,7 +931,12 @@ def _load_folder_with_retry(
             last_error = error
             if _is_load_timeout(error):
                 timeout_failures += 1
-            _log(f"Folder load attempt {attempt} failed: {error}")
+            log(
+                "download-folder",
+                "Folder load attempt {attempt} failed: {error}",
+                attempt=attempt,
+                error=error,
+            )
 
         _abort_if_browser_closed(page, last_error)
         _abort_if_browser_hung(timeout_failures, target_url, last_error)
@@ -867,8 +945,11 @@ def _load_folder_with_retry(
             break
 
         attempt += 1
-        _log(
-            f"Retrying folder load in {FOLDER_LOAD_RETRY_INTERVAL_MS // 1000}s: {target_url}"
+        log(
+            "download-folder",
+            "Retrying folder load in {retry_seconds}s: {target_url}",
+            retry_seconds=FOLDER_LOAD_RETRY_INTERVAL_MS // 1000,
+            target_url=target_url,
         )
         _sleep_before_retry(page, FOLDER_LOAD_RETRY_INTERVAL_MS)
 
@@ -894,16 +975,26 @@ def load_folder_entries_with_retry(
             cached_entries = cached.entries
             if cached_entries.files or cached_entries.folders:
                 cached_entries = normalize_remote_entries_hrefs(cached_entries)
-                _log(
-                    "Using cached folder entries: "
-                    f"{target_url} ({len(cached_entries.files)} file(s), "
-                    f"{len(cached_entries.folders)} folder(s))"
+                log(
+                    "download-folder",
+                    "Using cached folder entries: {target_url} ({files_count} file(s), {folders_count} folder(s))",
+                    target_url=target_url,
+                    files_count=len(cached_entries.files),
+                    folders_count=len(cached_entries.folders),
                 )
                 return cached_entries
             if cached.confirmed_empty:
-                _log(f"Using cached confirmed-empty folder: {target_url}")
+                log(
+                    "download-folder",
+                    "Using cached confirmed-empty folder: {target_url}",
+                    target_url=target_url,
+                )
                 return cached_entries
-            _log(f"Ignoring untrusted empty cache and reloading: {target_url}")
+            log(
+                "download-folder",
+                "Ignoring untrusted empty cache and reloading: {target_url}",
+                target_url=target_url,
+            )
 
     deadline = time.monotonic() + (FOLDER_LOAD_RETRY_TIMEOUT_MS / 1000)
     last_error: Exception = RuntimeError("Folder entries retry exhausted")
@@ -922,12 +1013,15 @@ def load_folder_entries_with_retry(
             entries = normalize_remote_entries_hrefs(
                 _evaluate_current_folder_entries(page)
             )
-            _log(
-                f"Folder entries attempt {attempt}: found {len(entries.files)} file(s), "
-                f"{len(entries.folders)} folder(s)"
+            log(
+                "download-folder",
+                "Folder entries attempt {attempt}: found {files_count} file(s), {folders_count} folder(s)",
+                attempt=attempt,
+                files_count=len(entries.files),
+                folders_count=len(entries.folders),
             )
             if not entries.files and not entries.folders:
-                _log("Folder entries are empty after loader settled")
+                log("download-folder", "Folder entries are empty after loader settled")
 
             write_folder_entries_cache(downloads_dir, target_url, entries)
 
@@ -942,7 +1036,12 @@ def load_folder_entries_with_retry(
             last_error = error
             if _is_load_timeout(error):
                 timeout_failures += 1
-            _log(f"Folder entries attempt {attempt} failed: {error}")
+            log(
+                "download-folder",
+                "Folder entries attempt {attempt} failed: {error}",
+                attempt=attempt,
+                error=error,
+            )
 
         _abort_if_browser_closed(page, last_error)
         _abort_if_browser_hung(timeout_failures, target_url, last_error)
@@ -951,8 +1050,11 @@ def load_folder_entries_with_retry(
             break
 
         attempt += 1
-        _log(
-            f"Retrying folder entries in {FOLDER_LOAD_RETRY_INTERVAL_MS // 1000}s: {target_url}"
+        log(
+            "download-folder",
+            "Retrying folder entries in {retry_seconds}s: {target_url}",
+            retry_seconds=FOLDER_LOAD_RETRY_INTERVAL_MS // 1000,
+            target_url=target_url,
         )
         _sleep_before_retry(page, FOLDER_LOAD_RETRY_INTERVAL_MS)
 
@@ -1017,11 +1119,20 @@ def _close_leftover_download_tabs(context: BrowserContext, *, keep: Page) -> Non
                 continue
             try:
                 tab.close()
-                _log(f"Closed leftover download tab: {url}")
+                log("download-folder", "Closed leftover download tab: {url}", url=url)
             except PlaywrightError as error:
-                _log(f"Failed to close leftover download tab ({url}): {error}")
+                log(
+                    "download-folder",
+                    "Failed to close leftover download tab ({url}): {error}",
+                    url=url,
+                    error=error,
+                )
     except Exception as error:
-        _log(f"Skipped leftover download tab cleanup: {error}")
+        log(
+            "download-folder",
+            "Skipped leftover download tab cleanup: {error}",
+            error=error,
+        )
 
 
 def download_one_file(
@@ -1031,7 +1142,11 @@ def download_one_file(
     cooldown_ms: int,
 ) -> Path:
     script = _load_js_asset("trigger_file_download.js")
-    _log(f"Starting download: {remote_file.file_name}")
+    log(
+        "download-folder",
+        "Starting download: {file_name}",
+        file_name=remote_file.file_name,
+    )
 
     context = page.context
 
@@ -1081,7 +1196,12 @@ def download_one_file(
     # we sweep any leftover tabs.
     staged_path = _stage_download_on_volume(download, staging_dir, remote_file)
     _close_leftover_download_tabs(context, keep=page)
-    _log(f"Staged download complete: {remote_file.file_name} -> {staged_path}")
+    log(
+        "download-folder",
+        "Staged download complete: {file_name} -> {staged_path}",
+        file_name=remote_file.file_name,
+        staged_path=staged_path,
+    )
     return staged_path
 
 

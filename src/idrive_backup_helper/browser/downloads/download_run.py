@@ -43,7 +43,6 @@ from idrive_backup_helper.browser.downloads.download_page import (
 from idrive_backup_helper.browser.downloads.download_progress import (
     ProgressEventLogger,
     build_progress_log_path,
-    log_download_message,
 )
 from idrive_backup_helper.browser.downloads.download_transfer import (
     transfer_remote_file_to_destination,
@@ -52,6 +51,7 @@ from idrive_backup_helper.browser.engine import BrowserConfig, BrowserEngine
 from idrive_backup_helper.filesystem.listing import existing_entry_names
 from idrive_backup_helper.filesystem.moves import clear_staging_dir
 from idrive_backup_helper.filesystem.paths import staging_dir_for_destination
+from idrive_backup_helper.runlog.console import log
 
 
 def _precheck_overwrite_conflicts(
@@ -130,8 +130,10 @@ def _capture_browser_crash_diagnostics(
             downloads_dir / f"download-folder-crash-{timestamp}-{death_number}.md"
         )
         report_path.write_text(report_text, encoding="utf-8")
-        log_download_message(
-            f"Browser tab died mid-run; wrote crash diagnostics: {report_path}"
+        log(
+            "download-folder",
+            "Browser tab died mid-run; wrote crash diagnostics: {report_path}",
+            report_path=report_path,
         )
         progress_logger.log(
             "browser_crash_diagnostics",
@@ -152,8 +154,10 @@ def _capture_browser_crash_diagnostics(
             ),
         )
     except Exception as diagnostics_error:
-        log_download_message(
-            f"Failed to capture browser-crash diagnostics: {diagnostics_error}"
+        log(
+            "download-folder",
+            "Failed to capture browser-crash diagnostics: {diagnostics_error}",
+            diagnostics_error=diagnostics_error,
         )
 
 
@@ -169,14 +173,19 @@ def _recover_page(
     # between, the browser itself is the problem, so skip the gentle rungs.
     try:
         if recoveries_without_progress >= RESTART_AFTER_RECOVERIES_WITHOUT_PROGRESS:
-            log_download_message(
-                f"{recoveries_without_progress} recoveries bought no progress; "
-                "restarting the browser from scratch"
+            log(
+                "download-folder",
+                "{recoveries_without_progress} recoveries bought no progress; restarting the browser from scratch",
+                recoveries_without_progress=recoveries_without_progress,
             )
             return engine.restart_browser()
         return engine.recover_page(dead_page)
     except Exception as recovery_error:
-        log_download_message(f"Browser recovery failed: {recovery_error}")
+        log(
+            "download-folder",
+            "Browser recovery failed: {recovery_error}",
+            recovery_error=recovery_error,
+        )
         return None
 
 
@@ -278,9 +287,11 @@ def _process_folder_task(
 
     for remote_folder in remote_entries.folders:
         child_destination = folder_task.destination / remote_folder.folder_name
-        log_download_message(
-            "Queueing child folder: "
-            f"{remote_folder.folder_name} -> {child_destination}"
+        log(
+            "download-folder",
+            "Queueing child folder: {folder_name} -> {child_destination}",
+            folder_name=remote_folder.folder_name,
+            child_destination=child_destination,
         )
         progress_logger.log(
             "folder_queued",
@@ -340,22 +351,29 @@ def _process_folder_task(
     )
     excluded_note = f", {excluded_in_folder} excluded" if excluded_in_folder else ""
     if not files_to_download:
-        log_download_message(
-            f"All {skipped_in_folder} file(s) already present{excluded_note} in "
-            f"{folder_task.destination}; nothing to download"
+        log(
+            "download-folder",
+            "All {skipped_in_folder} file(s) already present{excluded_note} in {folder_destination}; nothing to download",
+            skipped_in_folder=skipped_in_folder,
+            excluded_note=excluded_note,
+            folder_destination=folder_task.destination,
         )
     else:
-        log_download_message(
-            f"{skipped_in_folder} file(s) already present{excluded_note}, "
-            f"{len(files_to_download)} to download in "
-            f"{folder_task.destination}"
+        log(
+            "download-folder",
+            "{skipped_in_folder} file(s) already present{excluded_note}, {files_to_download_count} to download in {folder_destination}",
+            skipped_in_folder=skipped_in_folder,
+            excluded_note=excluded_note,
+            files_to_download_count=len(files_to_download),
+            folder_destination=folder_task.destination,
         )
 
     for remote_file, final_path, relative_path in files_to_download:
         if not folder_page_loaded_for_download:
-            log_download_message(
-                "Loading folder page before first download attempt: "
-                f"{folder_task.url}"
+            log(
+                "download-folder",
+                "Loading folder page before first download attempt: {folder_url}",
+                folder_url=folder_task.url,
             )
             ensure_folder_loaded_for_download(
                 page,
@@ -366,8 +384,10 @@ def _process_folder_task(
             )
             folder_page_loaded_for_download = True
 
-        log_download_message(
-            f"Attempting IDrive download for remote file: {relative_path}"
+        log(
+            "download-folder",
+            "Attempting IDrive download for remote file: {relative_path}",
+            relative_path=relative_path,
         )
         progress_logger.log(
             "file_download_started",
@@ -383,8 +403,10 @@ def _process_folder_task(
                 replace_existing=overwrite_mode == "replace",
                 cooldown_ms=cooldown_ms,
             )
-            log_download_message(
-                f"Moved download to destination: {downloaded_file.final_path}"
+            log(
+                "download-folder",
+                "Moved download to destination: {final_path}",
+                final_path=downloaded_file.final_path,
             )
         except BrowserClosedError:
             # The page is gone: this file is blameless, and every remaining file
@@ -392,8 +414,11 @@ def _process_folder_task(
             # fresh page (re-queuing this folder) or abort cleanly.
             raise
         except (OSError, RuntimeError) as error:
-            log_download_message(
-                f"Failed file download: {remote_file.file_name} ({error})"
+            log(
+                "download-folder",
+                "Failed file download: {file_name} ({error})",
+                file_name=remote_file.file_name,
+                error=error,
             )
             progress_logger.log(
                 "file_failed",
@@ -440,8 +465,11 @@ def download_current_folder(
     staging_dir = staging_dir_for_destination(destination)
     cleared_staging = clear_staging_dir(staging_dir)
     if cleared_staging:
-        log_download_message(
-            f"Cleared {len(cleared_staging)} leftover staging file(s) in {staging_dir}"
+        log(
+            "download-folder",
+            "Cleared {cleared_staging_count} leftover staging file(s) in {staging_dir}",
+            cleared_staging_count=len(cleared_staging),
+            staging_dir=staging_dir,
         )
     config = BrowserConfig(
         profile_dir=profile_dir,
@@ -487,9 +515,10 @@ def download_current_folder(
             successfulCount=len(successful_from_logs),
         )
         if successful_from_logs:
-            log_download_message(
-                "Resume log index loaded: "
-                f"{len(successful_from_logs)} previously successful file(s)"
+            log(
+                "download-folder",
+                "Resume log index loaded: {successful_from_logs_count} previously successful file(s)",
+                successful_from_logs_count=len(successful_from_logs),
             )
 
     manifest_writer = StreamingManifestWriter(
@@ -512,8 +541,10 @@ def download_current_folder(
             while folder_queue:
                 folder_task = folder_queue.pop(0)
                 if folder_task.destination in visited_destinations:
-                    log_download_message(
-                        f"Skipping already visited destination: {folder_task.destination}"
+                    log(
+                        "download-folder",
+                        "Skipping already visited destination: {folder_destination}",
+                        folder_destination=folder_task.destination,
                     )
                     progress_logger.log(
                         "folder_skipped_visited",
@@ -525,9 +556,12 @@ def download_current_folder(
                 visited_destinations.add(folder_task.destination)
                 folders_processed += 1
                 ensure_destination_dir(folder_task.destination)
-                log_download_message(
-                    f"Processing folder: {folder_task.url} -> {folder_task.destination} "
-                    f"(queue remaining: {len(folder_queue)})"
+                log(
+                    "download-folder",
+                    "Processing folder: {folder_url} -> {folder_destination} (queue remaining: {folder_queue_count})",
+                    folder_url=folder_task.url,
+                    folder_destination=folder_task.destination,
+                    folder_queue_count=len(folder_queue),
                 )
                 progress_logger.log(
                     "folder_started",
@@ -565,9 +599,11 @@ def download_current_folder(
                     # retries. Skip it (and its whole subtree) and keep the run
                     # going instead of failing the run or looping for a long time.
                     folders_unavailable += 1
-                    log_download_message(
-                        "Skipping folder IDrive would not open: "
-                        f"{folder_task.url} ({error})"
+                    log(
+                        "download-folder",
+                        "Skipping folder IDrive would not open: {folder_url} ({error})",
+                        folder_url=folder_task.url,
+                        error=error,
                     )
                     progress_logger.log(
                         "folder_unavailable",
@@ -594,9 +630,10 @@ def download_current_folder(
                         death_number=recoveries_used,
                     )
                     if recoveries_used > TAB_DEATH_RECOVERY_LIMIT:
-                        log_download_message(
-                            "Tab death recovery limit reached "
-                            f"({TAB_DEATH_RECOVERY_LIMIT}); aborting the run"
+                        log(
+                            "download-folder",
+                            "Tab death recovery limit reached ({recovery_limit}); aborting the run",
+                            recovery_limit=TAB_DEATH_RECOVERY_LIMIT,
                         )
                         raise
                     recovered_page = _recover_page(
@@ -622,9 +659,12 @@ def download_current_folder(
                         hung=isinstance(error, BrowserHungError),
                         folderUrl=folder_task.url,
                     )
-                    log_download_message(
-                        f"Recovered from browser death/hang {recoveries_used}/"
-                        f"{TAB_DEATH_RECOVERY_LIMIT}; retrying folder: {folder_task.url}"
+                    log(
+                        "download-folder",
+                        "Recovered from browser death/hang {recoveries_used}/{recovery_limit}; retrying folder: {folder_url}",
+                        recoveries_used=recoveries_used,
+                        recovery_limit=TAB_DEATH_RECOVERY_LIMIT,
+                        folder_url=folder_task.url,
                     )
                 else:
                     # A folder came through whole, so whatever we recovered onto is
@@ -642,9 +682,10 @@ def download_current_folder(
     finished_at = datetime.now()
     counts = manifest_writer.finalize(finished_at)
     if folders_unavailable:
-        log_download_message(
-            f"{folders_unavailable} folder(s) skipped because IDrive would not "
-            "open them (see folder_unavailable events in the progress log)"
+        log(
+            "download-folder",
+            "{folders_unavailable} folder(s) skipped because IDrive would not open them (see folder_unavailable events in the progress log)",
+            folders_unavailable=folders_unavailable,
         )
     report = DownloadFolderReport(
         url=url,
