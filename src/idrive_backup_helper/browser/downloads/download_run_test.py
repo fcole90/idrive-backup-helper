@@ -77,8 +77,10 @@ def test_download_current_folder_loads_cached_folder_before_first_download(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
-    downloads_dir = repo_root / ".agents" / "local" / "playground" / "downloads"
-    profile_dir = repo_root / ".agents" / "local" / "playground" / "browser-state"
+    downloads_dir = repo_root / ".agents" / "local" / "secrets" / "idrive" / "runs"
+    profile_dir = (
+        repo_root / ".agents" / "local" / "secrets" / "idrive" / "browser-state"
+    )
     destination = tmp_path / "destination"
     downloads_dir.mkdir(parents=True)
     profile_dir.mkdir(parents=True)
@@ -274,8 +276,10 @@ def test_download_current_folder_redownloads_when_resume_success_file_missing(
     tmp_path: Path,
 ) -> None:
     repo_root = tmp_path / "repo"
-    downloads_dir = repo_root / ".agents" / "local" / "playground" / "downloads"
-    profile_dir = repo_root / ".agents" / "local" / "playground" / "browser-state"
+    downloads_dir = repo_root / ".agents" / "local" / "secrets" / "idrive" / "runs"
+    profile_dir = (
+        repo_root / ".agents" / "local" / "secrets" / "idrive" / "browser-state"
+    )
     destination = tmp_path / "fresh-destination"
     downloads_dir.mkdir(parents=True)
     profile_dir.mkdir(parents=True)

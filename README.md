@@ -130,7 +130,7 @@ Start or attach to the persistent session:
 uv run main browse
 ```
 
-The browser profile is stored under `.agents/local/playground/browser-state/idrive-chromium`. Once the session is open, `download-folder` and `retry-manifest` will attach to it automatically when `--headed` is set.
+The browser profile is stored under `.agents/local/secrets/idrive/browser-state/idrive-chromium`. Raw progress logs, manifests, crash reports, and the folder cache go to `.agents/local/secrets/idrive/runs/`. Both sit under a `secrets/` folder that the repo's agent policy blocks, because they name your files, folders, and IDrive URLs. The first command after upgrading moves them there from their old place under `.agents/local/playground/`. Once the session is open, `download-folder` and `retry-manifest` will attach to it automatically when `--headed` is set.
 
 Use `--browser-debug-url <URL>` on any command to attach to a different Chromium remote debugging endpoint.
 

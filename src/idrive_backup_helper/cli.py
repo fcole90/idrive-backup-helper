@@ -19,8 +19,9 @@ from idrive_backup_helper.browser.session import (
 )
 from idrive_backup_helper.filesystem.paths import (
     browser_profile_dir,
-    downloads_dir,
     find_repo_root,
+    migrate_private_layout,
+    runs_dir,
 )
 
 DEFAULT_TIMEOUT_MS = 120 * 60 * 1_000
@@ -168,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
 def _run_auth(url: str, browser_debug_url: str) -> None:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
-    staged_downloads_dir = downloads_dir(repo_root)
+    staged_downloads_dir = runs_dir(repo_root)
     login_and_save_state(
         profile_dir=profile_dir,
         downloads_dir=staged_downloads_dir,
@@ -186,7 +187,7 @@ def _run_auth(url: str, browser_debug_url: str) -> None:
 def _run_browse(url: str, browser_debug_url: str) -> None:
     repo_root = find_repo_root()
     profile_dir = browser_profile_dir(repo_root)
-    staged_downloads_dir = downloads_dir(repo_root)
+    staged_downloads_dir = runs_dir(repo_root)
     open_authenticated_browser(
         profile_dir=profile_dir,
         downloads_dir=staged_downloads_dir,
@@ -218,7 +219,7 @@ def _run_download_folder(
     if not profile_dir.exists() and effective_browser_debug_url is None:
         raise RuntimeError("Missing browser auth state. Run: uv run main auth")
 
-    staged_downloads_dir = downloads_dir(repo_root)
+    staged_downloads_dir = runs_dir(repo_root)
     effective_headless = not headed and effective_browser_debug_url is None
 
     report = download_current_folder(
@@ -275,7 +276,7 @@ def _run_retry_manifest(
     if not profile_dir.exists() and effective_browser_debug_url is None:
         raise RuntimeError("Missing browser auth state. Run: uv run main auth")
 
-    staged_downloads_dir = downloads_dir(repo_root)
+    staged_downloads_dir = runs_dir(repo_root)
     effective_headless = not headed and effective_browser_debug_url is None
 
     report = retry_missing_files_from_manifest(
@@ -297,11 +298,21 @@ def _run_retry_manifest(
     return report.exit_code
 
 
+def _migrate_private_layout() -> None:
+    repo_root = find_repo_root()
+    for old, new in migrate_private_layout(repo_root):
+        print(
+            f"Moved {old.relative_to(repo_root)} to {new.relative_to(repo_root)} "
+            "(private data now lives under a protected secrets/ folder)"
+        )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     try:
+        _migrate_private_layout()
         if args.command == "auth":
             _run_auth(args.url, args.browser_debug_url)
             return 0
