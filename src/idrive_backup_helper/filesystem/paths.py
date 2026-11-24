@@ -12,7 +12,7 @@ def find_repo_root(start: Path | None = None) -> Path:
 
 
 def playground_dir(repo_root: Path) -> Path:
-    return repo_root / ".agents" / "playground"
+    return repo_root / ".agents" / "local" / "playground"
 
 
 def browser_profile_dir(repo_root: Path) -> Path:

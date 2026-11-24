@@ -130,7 +130,7 @@ Start or attach to the persistent session:
 uv run main browse
 ```
 
-The browser profile is stored under `.agents/playground/browser-state/idrive-chromium`. Once the session is open, `download-folder` and `retry-manifest` will attach to it automatically when `--headed` is set.
+The browser profile is stored under `.agents/local/playground/browser-state/idrive-chromium`. Once the session is open, `download-folder` and `retry-manifest` will attach to it automatically when `--headed` is set.
 
 Use `--browser-debug-url <URL>` on any command to attach to a different Chromium remote debugging endpoint.
 
@@ -159,10 +159,10 @@ uv run poe typecheck      # Run Pyright strict mode
 For long-running downloads, watch the memory, disk I/O, and GPU usage of the download process and the browser it drives:
 
 ```sh
-uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/playground --to-destination "/media/me/backup/device-2"
+uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/local/playground --to-destination "/media/me/backup/device-2"
 ```
 
-Pass `--to-destination` the **same path you give the download `--to` flag** (e.g. `"D:\Backups"` on Windows); its volume's free space is reported. `--out` is a directory; the script writes one timestamped `usage-<start>.csv` per run into it (`.agents/playground` is the ignored scratch folder). disk busy% and read/write rates already cover all disks regardless. It prints a line to the console each interval and appends the full metrics to the CSV. Works on Windows and Linux; stop with Ctrl-C.
+Pass `--to-destination` the **same path you give the download `--to` flag** (e.g. `"D:\Backups"` on Windows); its volume's free space is reported. `--out` is a directory; the script writes one timestamped `usage-<start>.csv` per run into it (`.agents/local/playground` is the ignored scratch folder). disk busy% and read/write rates already cover all disks regardless. It prints a line to the console each interval and appends the full metrics to the CSV. Works on Windows and Linux; stop with Ctrl-C.
 
 ## Legacy scripts
 

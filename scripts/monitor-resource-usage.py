@@ -6,7 +6,7 @@ diagnose a system going sluggish / a window "not responding" while CPU and RAM
 are only moderately used. It uses psutil (+ optional nvidia-smi) and only *reads*
 counters, so it does not connect to the browser or disturb the download.
 
-    uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/playground
+    uv run python scripts/monitor-resource-usage.py --interval 30 --out .agents/local/playground
 
 Per group (python download process, Chromium process tree):
 - rss / uss / vms: resident, private (Windows Private Bytes analog), and virtual.

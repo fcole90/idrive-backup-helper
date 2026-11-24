@@ -2,9 +2,7 @@
 .workspace
 
 # Local agent workspaces (task notes, scratch artifacts, retrospectives)
-.agents/tasks/
-.agents/playground/
-.agents/retro/
+/.agents/local/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
