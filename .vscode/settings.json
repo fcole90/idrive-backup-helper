@@ -65,5 +65,7 @@
   "cSpell.words": [
     "idrive"
   ],
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "chat.useAgentsMdFile": true,
+  "chat.useNestedAgentsMdFiles": true
 }
