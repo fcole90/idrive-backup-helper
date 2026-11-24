@@ -19,10 +19,12 @@ from idrive_backup_helper.browser.session import (
 from idrive_backup_helper.filesystem.paths import (
     browser_profile_dir,
     find_repo_root,
+    default_anon_log_dir,
     migrate_private_layout,
     runs_dir,
 )
-from idrive_backup_helper.runlog.console import log, log_error
+from idrive_backup_helper.runlog.anon_sink import open_anon_run_log
+from idrive_backup_helper.runlog.console import log, log_error, use_sink
 
 DEFAULT_TIMEOUT_MS = 120 * 60 * 1_000
 
@@ -34,6 +36,21 @@ def _exclude_pattern_arg(value: str) -> str:
         return validate_exclude_pattern(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _add_anon_log_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--with-anon-log",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Also write an anonymized log, safe to share with an AI agent, to DIR "
+            "(default .agents/local/playground/anon-logs), and print the anonymized "
+            "lines to the terminal; the raw logs stay under .agents/local/secrets/"
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,6 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify which files from a download manifest are still missing locally",
     )
     verify_parser.add_argument("--manifest", required=True, type=Path)
+    _add_anon_log_argument(verify_parser)
 
     retry_parser = subparsers.add_parser(
         "retry-manifest",
@@ -162,6 +180,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Defaults to the local session when --headed is set."
         ),
     )
+
+    _add_anon_log_argument(download_parser)
+    _add_anon_log_argument(retry_parser)
 
     return parser
 
@@ -341,7 +362,73 @@ def _migrate_private_layout() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    anon_dir_arg: str | None = getattr(args, "with_anon_log", None)
+    if anon_dir_arg is None:
+        return _dispatch(parser, args)
+    return _main_with_anon_log(parser, args, anon_dir_arg)
 
+
+def _private_values(args: argparse.Namespace) -> dict[str, object]:
+    """The run's private arguments, keyed like log fields."""
+    names = {
+        "url": "url",
+        "to": "destination",
+        "manifest": "manifest_path",
+        "exclude": "exclude_patterns",
+    }
+    return {
+        field: getattr(args, attribute)
+        for attribute, field in names.items()
+        if getattr(args, attribute, None) is not None
+    }
+
+
+def _repo_relative(path: Path, repo_root: Path) -> Path:
+    try:
+        return path.resolve().relative_to(repo_root)
+    except ValueError:
+        return path
+
+
+def _main_with_anon_log(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, anon_dir_arg: str
+) -> int:
+    repo_root = find_repo_root()
+    anon_dir = (
+        default_anon_log_dir(repo_root) if anon_dir_arg == "" else Path(anon_dir_arg)
+    )
+    sink = open_anon_run_log(
+        repo_root=repo_root,
+        command=args.command,
+        anon_dir=anon_dir,
+        private_values=_private_values(args),
+    )
+    with use_sink(sink):
+        log(
+            None,
+            "Anonymized log: {anon_log_path}",
+            anon_log_path=_repo_relative(sink.anon_log_path, repo_root),
+        )
+        # A traceback would print private paths and URLs to the terminal, so
+        # every exception is caught: the full traceback goes to the raw console
+        # log in the secrets folder, and the terminal gets a scrubbed line.
+        try:
+            return _dispatch(parser, args)
+        except KeyboardInterrupt as error:
+            sink.record_exception(error)
+            log_error("Interrupted")
+            return 130
+        except Exception as error:
+            sink.record_exception(error)
+            log_error(
+                "Unexpected {error_type}: {error}",
+                error_type=type(error).__name__,
+                error=str(error),
+            )
+            return 1
+
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     try:
         _migrate_private_layout()
         if args.command == "auth":
