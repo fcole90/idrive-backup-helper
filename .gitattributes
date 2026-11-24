@@ -1,5 +1,10 @@
+# LF in every checkout, whatever core.autocrlf says.
+* text=auto eol=lf
+
 # Set the default behavior, in case people don't have core.autocrlf set.
 * text=auto
 
 # Declare files that will always have CRLF line endings on checkout.
 *.sln text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
