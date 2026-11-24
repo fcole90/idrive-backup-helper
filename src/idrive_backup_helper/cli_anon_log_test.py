@@ -74,6 +74,10 @@ def _fake_transfer(
     )
 
 
+def _no_op(*_: object, **__: object) -> None:
+    return None
+
+
 @pytest.fixture
 def fake_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
@@ -82,9 +86,7 @@ def fake_repo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.chdir(repo_root)
     monkeypatch.setattr(download_run, "BrowserEngine", FakeBrowserEngine)
     monkeypatch.setattr(download_run, "load_folder_entries_with_retry", _fake_entries)
-    monkeypatch.setattr(
-        download_run, "ensure_folder_loaded_for_download", lambda *a, **k: None
-    )
+    monkeypatch.setattr(download_run, "ensure_folder_loaded_for_download", _no_op)
     monkeypatch.setattr(
         download_run, "transfer_remote_file_to_destination", _fake_transfer
     )
