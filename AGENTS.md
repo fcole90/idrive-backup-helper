@@ -86,7 +86,8 @@ A feature folder may carry its own `AGENTS.md` with the rules for that folder on
 
 ## Project Layout
 
-- `src/idrive_backup_helper/` is the package: `cli.py` and `main.py` (the `main` console script), `browser/` for the Playwright automation (`browser/downloads/` runs downloads, with the page-side scripts in `browser/downloads/js/`), and `filesystem/` for local paths and staging.
+- `src/idrive_backup_helper/` is the package: `cli.py` and `main.py` (the `main` console script), `browser/` for the Playwright automation (`browser/downloads/` runs downloads, with the page-side scripts in `browser/downloads/js/`), `filesystem/` for local paths and staging, `runlog/` for console output and the anonymized log, and `profiles/` for saved run profiles.
+- All console output goes through `runlog.console.log(source, template, **fields)`. Never format a value into the template with an f-string: pass it as a named field, named so `runlog/fields.py` recognises it (`*_url`, `*_path`, `*_dir`, `*_name`, `error`, ...). The anonymizer decides by field name, and an unrecognised text field turns into an opaque token. New progress-event fields follow the same naming.
 - Tests sit next to the code they cover as `*_test.py`; pytest collects them from `src/` and `scripts/`.
 - `scripts/` holds standalone maintenance and legacy scripts (Python and browser-console JavaScript). The wheel packages it, but it is not product code.
 - `playwright` is pinned to an exact version in `pyproject.toml`, and `.github/dependabot.yml` ignores it. Move it only by hand, after checking that its browser downloads (`uv run poe browser-setup`): CI installs no browser, so a broken bump still passes CI.
@@ -104,6 +105,14 @@ When working on this project:
 
 Run steps 3–5 as a loop, not a phase: for a task with several steps or several review comments, take one item at a time — edit, then lint and type-check, then commit — before starting the next.
 
+## Running and Monitoring Downloads
+
+An agent may start or watch a download only in a way that keeps private data out of its context:
+
+- Start runs only with `uv run main run --profile <name>` (add `--retry` to retry missing files), which writes the anonymized log. The user saves profiles; never pass `--raw-log`, and never pass `--url` or `--to` yourself unless the user gave you those values.
+- Read only the anonymized logs (`.agents/local/playground/anon-logs/*.anon.ndjson`, or the folder the user names) and the anonymized terminal output. Never open the raw logs, manifests, profile config, or key under `.agents/local/secrets/`.
+- Tokens such as `d~1a2b3c4d` are stable, so use them to spot a folder or file that keeps failing; ask the user to look up the real name when they need it.
+
 ## Local Agent Workspaces
 
 - `.agents/local/playground/` holds temporary helper scripts, scratch files, and generated local artifacts that should not enter normal repo context.
@@ -115,7 +124,8 @@ Run steps 3–5 as a loop, not a phase: for a task with several steps or several
 
 - `uv sync` — Install or refresh dependencies.
 - `uv run poe browser-setup` — Install the Playwright-managed Chromium.
-- `uv run main <command>` — Run the CLI (`auth`, `browse`, `download-folder`, `retry-manifest`, ...); `uv run main --help` lists them.
+- `uv run main <command>` — Run the CLI (`auth`, `browse`, `download-folder`, `retry-manifest`, `config`, `run`, ...); `uv run main --help` lists them.
+- `uv run main run --profile <name> [--retry]` — Run a saved profile with the anonymized log; the only way an agent starts a download.
 - `uv run poe test` — Run tests.
 - `uv run poe lint` — Check formatting.
 - `uv run poe lint-fix` — Auto-format code.

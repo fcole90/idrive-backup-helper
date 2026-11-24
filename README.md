@@ -134,6 +134,39 @@ The browser profile is stored under `.agents/local/secrets/idrive/browser-state/
 
 Use `--browser-debug-url <URL>` on any command to attach to a different Chromium remote debugging endpoint.
 
+## Saved profiles
+
+Save a `download-folder` command once, under a name, instead of retyping its flags:
+
+```sh
+uv run main config save photos download-folder --url "<FOLDER_URL>" --to "D:\Backups\Photos" --exclude "*.tmp"
+uv run main run --profile photos          # run it again
+uv run main run --profile photos --retry  # retry missing files from its newest manifest
+uv run main config list                   # profile names
+uv run main config show photos            # settings; the URL, paths, and patterns show as "set"
+```
+
+Profiles live in `.agents/local/secrets/idrive/config.toml`. You can edit that file by hand: each profile is a `[profiles.<name>]` table whose keys are the flag names with `_` for `-` (`url`, `to`, `exclude`, `cooldown_ms`, `with_anon_log`, ...). Saving rewrites the file and drops comments.
+
+A profile run writes an anonymized log by default (see below), because a profile is how an AI agent starts a run without seeing its URL or destination. Pass `--raw-log` to see the raw lines instead.
+
+## Anonymized logs for AI agents
+
+Add `--with-anon-log` to `download-folder`, `retry-manifest`, or `verify-manifest` to get a log you can hand to an AI agent, for example a Claude session that watches a long run and reports problems:
+
+```sh
+uv run main download-folder --url "<FOLDER_URL>" --to "<DEST>" --with-anon-log           # .agents/local/playground/anon-logs/
+uv run main download-folder --url "<FOLDER_URL>" --to "<DEST>" --with-anon-log=D:\logs   # a folder you choose
+```
+
+With the flag:
+
+- The anonymized log, `<command>-<time>.anon.ndjson`, holds every console line and progress event, one JSON object per line. Folder names, file names, paths, URLs, emails, and error text are replaced by tokens such as `d~1a2b3c4d` (a folder) or `f~9e8d7c6b.pdf` (a file, keeping its extension). Each folder gets its own token, so files in one folder share it, and a remote IDrive folder has the same token as its local copy. IDrive routes, counts, timings, and website error codes such as `INVALID PATH` stay readable.
+- The terminal shows the same anonymized lines, so an agent watching it sees nothing private. The raw lines, and any Python traceback, go to `.agents/local/secrets/idrive/runs/<command>-console-<time>.log`.
+- Tokens come from a key created on first use at `.agents/local/secrets/idrive/anon-key`. The same name gets the same token in every run on this machine; without the key, nobody can check a guessed name against a token. Delete the key to start a fresh set of tokens.
+
+Without the flag, output is unchanged: raw lines on the terminal, raw logs under `.agents/local/secrets/idrive/runs/`.
+
 ## All commands
 
 ```sh
@@ -142,6 +175,8 @@ uv run main browse                # Open authenticated browser for manual naviga
 uv run main download-folder       # Download all files in an IDrive folder
 uv run main verify-manifest       # Check which files from a manifest are still missing
 uv run main retry-manifest        # Re-download only the missing files
+uv run main config save|list|show # Save a download-folder run as a named profile
+uv run main run --profile NAME    # Run a saved profile (add --retry for missing files)
 ```
 
 ## Development
