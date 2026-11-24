@@ -9,11 +9,30 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # Tooling only; a broken minor shows up in CI, not in what consumers install.
+      dev-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
       # Pinned to 1.62.0 in pyproject.toml: 1.63 failed to download its browser.
       # CI never installs a browser, so an auto-merged bump would pass CI anyway.
       - dependency-name: "playwright"
+      # A git dependency, but Dependabot looks it up on PyPI, where an unrelated package of the same
+      # name lives, and fails the whole run. `uv run poe upgrade-agentic-tools` moves it instead.
+      - dependency-name: "agentic-tools"
+    cooldown:
+      default-days: 2
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 2
